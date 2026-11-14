@@ -1,0 +1,37 @@
+[project]
+name = "floor-seg"
+version = "0.1.0"
+description = "Floor segmentation for the Reachy Mini camera: LR-ASPP / MobileNetV3-Small trained on ProcTHOR renders"
+readme = "README.md"
+license = "Apache-2.0"
+requires-python = ">=3.10"
+dependencies = [
+    "torch",
+    "torchvision",
+    "numpy",
+    "opencv-python-headless",
+    "onnxruntime",
+    "onnx",                 # torch.onnx.export
+    "huggingface_hub",
+    "safetensors",
+    "datasets",
+]
+
+[project.optional-dependencies]
+# floor_seg.thor_render: AI2-THOR 5 needs Python 3.11; install in a separate env (see the module docstring)
+render = ["ai2thor==5.0.0", "prior==1.0.3"]
+# floor_seg.label_real: SAM2 through the transformers mask-generation pipeline
+label = ["transformers", "pillow"]
+
+[dependency-groups]
+dev = ["pytest"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["floor_seg"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

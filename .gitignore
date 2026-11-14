@@ -1,0 +1,18 @@
+# data and weights live outside git (Hugging Face Hub)
+data/
+models/
+hf/
+*.pt
+*.pth
+*.onnx
+*.safetensors
+*.parquet
+
+# python
+__pycache__/
+*.pyc
+.venv*/
+.pytest_cache/
+*.egg-info/
+dist/
+build/

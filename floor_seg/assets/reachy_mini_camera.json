@@ -1,0 +1,40 @@
+{
+  "description": "Reachy Mini head camera, 1280x720 mode: OpenCV rational model (12 coefficients). ChArUco calibration of one unit. Used to render the synthetic data (floor_seg/thor_render.py) and for floor retexturing (floor_seg/floor_tex.py).",
+  "image_resolution": [
+    1280,
+    720
+  ],
+  "K": [
+    [
+      823.8098073136887,
+      0.0,
+      652.6246768657057
+    ],
+    [
+      0.0,
+      821.1821397337808,
+      391.3507173813659
+    ],
+    [
+      0.0,
+      0.0,
+      1.0
+    ]
+  ],
+  "D": [
+    80.09479796806671,
+    -111.98321045341817,
+    0.01994899080739823,
+    0.0040966748787654534,
+    722.305345666234,
+    80.28456238260867,
+    -109.37504359273203,
+    724.9628501218442,
+    -0.0026936975547939513,
+    -0.0009985151337140313,
+    -0.021079435085709638,
+    0.0019782801202983327
+  ],
+  "rms_px": 0.21876891782243482,
+  "n_views": 40
+}
