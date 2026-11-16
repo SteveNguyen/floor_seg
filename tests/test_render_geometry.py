@@ -52,10 +52,11 @@ def test_underside_map_lowest_surface_decides():
     surface(um, (3, 4), (0, 1), 1.5)         # loft bed: drivable under
     surface(um, (5, 6), (0, 1), 0.72)        # dining table: drivable under
     surface(um, (7, 7.5), (0, 0.5), 0.42)    # chair seat: under
-    surface(um, (8, 8.2), (0, 0.2), -0.3)    # object sunk into the floor: clamped to 0, under
-    pts = np.array([[1, 0.5], [3.5, 0.5], [5.5, 0.5], [7.2, 0.2], [8.1, 0.1], [9, 1.5]])
+    surface(um, (8, 8.2), (0, 0.2), 0.0)     # box standing on the floor: contact, the floor is covered, not under
+    surface(um, (8.6, 9.0), (1, 1.5), 0.25)  # ...but a 25 cm overhang (bed frame) is
+    pts = np.array([[1, 0.5], [3.5, 0.5], [5.5, 0.5], [7.2, 0.2], [8.1, 0.1], [9.5, 0.5], [8.8, 1.2]])
     um.finish()
-    assert um.lookup(pts[:, 0], pts[:, 1]).tolist() == [True, False, False, True, True, False]
+    assert um.lookup(pts[:, 0], pts[:, 1]).tolist() == [True, False, False, True, False, False, True]
     assert not um.unknown[1:-1, 1:-1].any()
 
 

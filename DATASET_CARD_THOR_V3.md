@@ -87,7 +87,9 @@ plus 5 cm). Measured from the geometry, not from object boxes: a depth render fr
 up (the floor mesh is invisible from below) gives the height of the lowest surface above every floor point
 (2 cm grid over the whole house). Then: gaps narrower than ~10 cm between under cells are closed (bed slats,
 shelf slats), free pockets smaller than 0.25 m^2 fully enclosed by under cells become under (inside a bar
-stool's foot ring, chair stretchers), and cells never measured count as under. So the floor under a bed, sofa,
+stool's foot ring, chair stretchers), and cells never measured count as under. Not under: cells whose lowest
+surface is below 3 cm (an object standing on the floor covers it; this keeps rims off object bases) and walls,
+doors and windows (structure, not overhangs). So the floor under a bed, sofa,
 chair seat or low table is under; under a dining table, desk or loft bed it is not (only around their legs).
 
 No noise, blur or colour jitter is baked in (training-time augmentation, as are floor retexturing and the

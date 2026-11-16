@@ -62,6 +62,8 @@ FP_RES = 0.02         # m, top-down raster
 UNDER_D = 10.0        # m, underside camera below the floor ...
 UNDER_FOV = 20.0      # deg (vertical): nearly vertical rays (<= ~18 deg off at a tile corner)
 STRUCTURE = {"Floor", "Wall", "Doorway", "Doorframe", "Window", "Painting"}  # not named on the QA plan
+STRUCTURE_IDS = ("wall", "door", "window")  # instance ids seen from below that are not overhangs
+CONTACT_M = 0.03      # m: a lowest surface below this rests on the floor (covers it), it is not an overhang
 # table views
 SUPPORT_TYPES = {"DiningTable", "CounterTop", "SideTable", "TVStand", "CoffeeTable"}
 SUPPORT_MIN = (0.6, 0.45)  # m, smallest top (long x short side) the base can stand on
@@ -136,7 +138,8 @@ class UndersideMap:
     3D point on the underside of something (bed slats, chair seat, table top, ceiling), added with add().
     Cells hidden behind a lower surface get no sample: finish() fills them from their neighbours (FILL_PX),
     and what is still unknown counts as under (safe side). Gaps narrower than CLOSE_PX cells between under
-    cells (slats) are closed, and enclosed pockets of free floor smaller than POCKET_M2 become under.
+    cells (slats) are closed, and enclosed pockets of free floor smaller than POCKET_M2 become under. Cells
+    whose lowest surface is below CONTACT_M are contact (an object standing there), not under.
     """
     FILL_PX = 3
     CLOSE_PX = 5       # 10 cm
@@ -179,7 +182,9 @@ class UndersideMap:
         # rasterised ring does not count as a way in. Rooms are enclosed by walls too, hence the size limit.
         n, lab, st, _ = cv2.connectedComponentsWithStats((~grid).astype(np.uint8), connectivity=4)
         small = np.r_[False, st[1:, cv2.CC_STAT_AREA] * FP_RES ** 2 < self.POCKET_M2]
-        self.grid = grid | small[lab]
+        # contact cells (lowest surface < CONTACT_M: an object standing on the floor) are not under: the floor
+        # there is covered, and visible floor pixels landing in them are rims around object bases
+        self.grid = (grid | small[lab]) & ~(self.h < CONTACT_M)
 
     def lookup(self, x, z):
         """True where world (x, z) is under something lower than CLEARANCE (outside the raster: False)."""
@@ -216,7 +221,16 @@ def measure_underside(ctrl, cam_id, reach, objects, wr, hr):
             depth = ev.third_party_depth_frames[cam_id]
             hgt = height_above_floor(depth, f, -UNDER_D, -90.0, 0.0)  # looking up: = depth - UNDER_D
             wx, wz = world_xz(depth, f, float(cx), float(cz), 0.0, -90.0, 0.0)
-            hit = hgt < 5.0  # rays that hit nothing return the far plane
+            # rays that hit nothing return the far plane (20 m: height ~10 m). Not "height < 5 m": a 5.05 m
+            # ceiling was then dropped and its whole house stayed unmeasured, i.e. all under.
+            hit = hgt < UNDER_D - 0.5
+            # walls, doors, windows start a few cm above the floor but are structure, not overhangs: their
+            # cells count as clear above (else the floor at every wall base is under)
+            seg = ev.third_party_instance_segmentation_frames[cam_id][:, :, :3].astype(np.int32)
+            code = (seg[:, :, 0] << 16) | (seg[:, :, 1] << 8) | seg[:, :, 2]
+            wall = np.isin(code, [(c[0] << 16) | (c[1] << 8) | c[2] for c, oid in ev.color_to_object_id.items()
+                                  if oid.lower().startswith(STRUCTURE_IDS)])
+            hgt = np.where(wall, np.float32(UNDER_D), hgt)
             um.add(wx[hit], wz[hit], hgt[hit])
     um.finish()
     for o in objects:
@@ -371,6 +385,7 @@ def main():
     ap.add_argument("--shard", type=int, nargs=2, metavar=("I", "N"), default=(0, 1),
                     help="render only houses I, I+N, I+2N... of the list (N processes or machines in parallel, "
                          "same --out; stats go to stats_s<I>.jsonl, merge with: cat stats_s*.jsonl > stats.jsonl)")
+    ap.add_argument("--only", type=int, nargs="+", help="render only these house indices (QA), instead of the list")
     args = ap.parse_args()
     os.makedirs(args.out, exist_ok=True)
     si, sn = args.shard
@@ -394,7 +409,7 @@ def main():
             by_type.setdefault(a["objectType"], []).append((aid, a["boundingBox"]))
 
     stats_f = open(stats_path, "a")
-    for hi in order[:args.houses][si::sn]:
+    for hi in (args.only or order[:args.houses])[si::sn]:
         if hi in done:
             continue
         rng = random.Random(args.seed * 100003 + hi)  # per house: reproducible and resumable
