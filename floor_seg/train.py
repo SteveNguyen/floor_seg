@@ -15,6 +15,8 @@ than the robot above it" (see model.FloorNet); its loss is on floor pixels only,
 precision, recall) are reported but best.pt is still chosen on floor IoU.
 
     python -m floor_seg.train --data data/synth/thor_v3 --out models/floor_v5_under --tex data/textures/ambientcg --under
+    # several folders are mixed (thor_v1 views have no _under.png: they train the floor output only)
+    python -m floor_seg.train --data data/synth/thor_v1 data/synth/thor_v3 --out models/floor_v6_mix --tex data/textures/ambientcg --under
 Saves best.pt (by floor IoU), last.pt, floor.onnx (fp32, from best) and metrics.jsonl.
 """
 import argparse
@@ -26,7 +28,7 @@ import time
 import cv2
 import numpy as np
 import torch
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import ConcatDataset, DataLoader, Dataset
 
 from floor_seg import DEFAULT_CALIB
 from floor_seg.export_onnx import export
@@ -114,8 +116,8 @@ class Renders(Dataset):
         img = cv2.imread(base + ".jpg")  # BGR
         floor = (cv2.imread(base + "_floor.png", 0) > 127).astype(np.uint8)
         mask = floor  # 0 / 1, IGNORE added by augment
-        if self.under:
-            u = cv2.imread(base + "_under.png", 0)
+        if self.under:  # no _under.png (thor_v1 views in a mixed set): floor with 'under' unknown
+            u = cv2.imread(base + "_under.png", 0) if os.path.exists(base + "_under.png") else None
             mask = encode_labels(floor, None if u is None else (u > 127).astype(np.uint8))
         if self.train:
             rng = random.Random(random.getrandbits(32))
@@ -128,6 +130,21 @@ class Renders(Dataset):
         mask = cv2.resize(mask, (IN_W, IN_H), interpolation=cv2.INTER_NEAREST)
         x = ((img - MEAN) / STD).transpose(2, 0, 1)
         return torch.from_numpy(x.copy()), torch.from_numpy(mask.astype(np.int64))
+
+
+def datasets(roots, under=False, kinds=None, ftex=None):
+    """Train and val datasets over one or several render folders (e.g. thor_v1 + thor_v3), each split by house
+    (house % 10 == 0 -> val). One Renders per folder: view names repeat across folders (same house, same index),
+    so names and poses stay per folder. kinds: keep only these view kinds (thor_v1 has none: all floor views)."""
+    tr, va = [], []
+    for root in roots:
+        stats = [json.loads(line) for line in open(os.path.join(root, "stats.jsonl"))]
+        if kinds:
+            stats = [s for s in stats if s.get("kind", "floor") in kinds]
+        poses = {s["name"]: (s["pitch"], s["roll"], s["h"]) for s in stats}
+        tr.append(Renders(root, [s["name"] for s in stats if s["house"] % 10 != 0], True, poses, ftex, under=under))
+        va.append(Renders(root, [s["name"] for s in stats if s["house"] % 10 == 0], False, under=under))
+    return ConcatDataset(tr), ConcatDataset(va)
 
 
 def evaluate(model, loader, dev):
@@ -159,7 +176,7 @@ def evaluate(model, loader, dev):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--data", required=True)
+    ap.add_argument("--data", required=True, nargs="+", help="one or several render folders (mixed, each split by house)")
     ap.add_argument("--out", required=True)
     ap.add_argument("--epochs", type=int, default=30)
     ap.add_argument("--batch", type=int, default=32)
@@ -170,26 +187,21 @@ def main():
     ap.add_argument("--kinds", nargs="+", help="keep only these view kinds of stats.jsonl (thor_v2: floor, table)")
     ap.add_argument("--under", action="store_true", help="3-channel model with the 'under' output (needs _under.png)")
     ap.add_argument("--w-under", type=float, default=1.0, help="weight of the under loss (with --under)")
+    ap.add_argument("--backbone", choices=["small", "large"], default="small", help="MobileNetV3 size (model.FloorNet)")
     args = ap.parse_args()
     os.makedirs(args.out, exist_ok=True)
     random.seed(0)
     torch.manual_seed(0)
 
-    stats = [json.loads(line) for line in open(os.path.join(args.data, "stats.jsonl"))]
-    if args.kinds:  # thor_v1 has no "kind": all its views are floor views
-        stats = [s for s in stats if s.get("kind", "floor") in args.kinds]
-    train_names = [s["name"] for s in stats if s["house"] % 10 != 0]
-    val_names = [s["name"] for s in stats if s["house"] % 10 == 0]
-    print(f"train {len(train_names)} views, val {len(val_names)} views (by house)", flush=True)
     ftex = FloorTex(args.tex, args.calib) if args.tex else None
-    poses = {s["name"]: (s["pitch"], s["roll"], s["h"]) for s in stats}
-    tl = DataLoader(Renders(args.data, train_names, True, poses, ftex, under=args.under), batch_size=args.batch,
+    train_ds, val_ds = datasets(args.data, args.under, args.kinds, ftex)
+    print(f"train {len(train_ds)} views, val {len(val_ds)} views (by house)", flush=True)
+    tl = DataLoader(train_ds, batch_size=args.batch,
                     shuffle=True, num_workers=args.workers, drop_last=True, persistent_workers=True)
-    vl = DataLoader(Renders(args.data, val_names, False, under=args.under), batch_size=args.batch,
-                    num_workers=args.workers)
+    vl = DataLoader(val_ds, batch_size=args.batch, num_workers=args.workers)
 
     dev = "cuda"
-    model = FloorNet(under=args.under).to(dev)
+    model = FloorNet(under=args.under, backbone=args.backbone).to(dev)
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
     sched = torch.optim.lr_scheduler.OneCycleLR(opt, max_lr=args.lr, total_steps=args.epochs * len(tl), pct_start=0.1)
     scaler = torch.amp.GradScaler()

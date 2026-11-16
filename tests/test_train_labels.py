@@ -23,6 +23,29 @@ def test_under_loss_only_on_labelled_floor():
     assert z.grad[0, :2, 0, 3].abs().sum() > 0         # FLOOR_NA still trains floor
 
 
+def test_mixed_folders_keep_their_own_labels(tmp_path):
+    # thor_v1-like folder (no _under.png) + thor_v3-like folder (same view names, with _under.png): each view is
+    # read from its own folder, v1 views are FLOOR_NA, v3 views carry UNDER; split by house in both folders
+    import cv2
+    from conftest import make_renders
+    from floor_seg.train import datasets
+
+    v1, v3 = tmp_path / "v1", tmp_path / "v3"
+    v1.mkdir()
+    v3.mkdir()
+    make_renders(v1)
+    make_renders(v3)
+    for name in ("h00003_0", "h00003_1", "h00010_0", "h00010_1"):
+        u = np.zeros((360, 640), np.uint8)
+        u[300:] = 255  # bottom rows of the floor are under
+        cv2.imwrite(str(v3 / f"{name}_under.png"), u)
+    tr, va = datasets([str(v1), str(v3)], under=True)
+    assert len(tr) == 4 and len(va) == 4  # house 3 -> train, house 10 -> val, in each folder
+    labs = [set(np.unique(va[i][1].numpy())) for i in range(4)]
+    assert labs[0] == labs[1] == {NOT_FLOOR, FLOOR_NA}
+    assert labs[2] == labs[3] == {NOT_FLOOR, FLOOR, UNDER}
+
+
 def test_two_channel_loss_unchanged():
     # a floor-only model with 0/1 labels: plain cross-entropy, as before the under output
     lab = torch.tensor([[[0, 1, 1, IGNORE]]])

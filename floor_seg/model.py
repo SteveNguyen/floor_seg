@@ -11,7 +11,8 @@ FloorNet.from_pretrained(repo_id or dir) loads them (huggingface_hub.PyTorchMode
 import numpy as np
 import torch
 from huggingface_hub import PyTorchModelHubMixin
-from torchvision.models import MobileNet_V3_Small_Weights, mobilenet_v3_small
+from torchvision.models import (MobileNet_V3_Large_Weights, MobileNet_V3_Small_Weights, mobilenet_v3_large,
+                                mobilenet_v3_small)
 from torchvision.models._utils import IntermediateLayerGetter
 from torchvision.models.segmentation.lraspp import LRASPP
 
@@ -21,10 +22,11 @@ STD = np.array([0.229, 0.224, 0.225], np.float32)
 THRESHOLD = 0.8  # floor probability above which a pixel is floor (trades missed floor for fewer false floor)
 
 
-def lraspp_small(pretrained_backbone=True, num_classes=2):
-    """Same construction as torchvision's lraspp_mobilenet_v3_large, on the small backbone."""
-    weights = MobileNet_V3_Small_Weights.IMAGENET1K_V1 if pretrained_backbone else None
-    backbone = mobilenet_v3_small(weights=weights, dilated=True).features
+def lraspp(pretrained_backbone=True, num_classes=2, backbone="small"):
+    """Same construction as torchvision's lraspp_mobilenet_v3_large, on the small (default) or large backbone."""
+    net, w = {"small": (mobilenet_v3_small, MobileNet_V3_Small_Weights.IMAGENET1K_V1),
+              "large": (mobilenet_v3_large, MobileNet_V3_Large_Weights.IMAGENET1K_V1)}[backbone]
+    backbone = net(weights=w if pretrained_backbone else None, dilated=True).features
     stage_indices = [0] + [i for i, b in enumerate(backbone) if getattr(b, "_is_cn", False)] + [len(backbone) - 1]
     low_pos, high_pos = stage_indices[-4], stage_indices[-1]
     low_ch, high_ch = backbone[low_pos].out_channels, backbone[high_pos].out_channels
@@ -41,11 +43,12 @@ class FloorNet(torch.nn.Module, PyTorchModelHubMixin, library_name="floor_seg", 
     under: a third output channel, the "under" logit (sigmoid > 0.5: this floor pixel has something lower than
     the robot above it, e.g. under a bed; meaningful on floor pixels only). Channels 0-1 stay the floor logits,
     so code reading floor as softmax(z[:2])[1] or z[1] - z[0] works unchanged with either model.
+    backbone: "small" (1.1 M parameters, the CM4 model) or "large" (MobileNetV3-Large, ~3.2 M, capacity test).
     """
 
-    def __init__(self, pretrained_backbone=True, under=False):
+    def __init__(self, pretrained_backbone=True, under=False, backbone="small"):
         super().__init__()
-        self.m = lraspp_small(pretrained_backbone, num_classes=3 if under else 2)
+        self.m = lraspp(pretrained_backbone, num_classes=3 if under else 2, backbone=backbone)
 
     def forward(self, x):
         return self.m(x)["out"]
@@ -55,8 +58,9 @@ def load_torch(path):
     """FloorNet in eval mode from a .pt state dict, a local save_pretrained folder or a Hub repo id."""
     if path.endswith(".pt"):
         sd = torch.load(path, map_location="cpu")
-        under = sd["m.classifier.low_classifier.weight"].shape[0] == 3  # a .pt has no config: read the head size
-        model = FloorNet(pretrained_backbone=False, under=under)
+        # a .pt has no config: read the head size (2 or 3 outputs) and its low-level input width (small 16, large 40)
+        w = sd["m.classifier.low_classifier.weight"]
+        model = FloorNet(pretrained_backbone=False, under=w.shape[0] == 3, backbone="large" if w.shape[1] == 40 else "small")
         model.load_state_dict(sd)
     else:  # pretrained_backbone=False overrides config.json: no ImageNet download, all weights come from the file
         model = FloorNet.from_pretrained(path, pretrained_backbone=False, strict=True)

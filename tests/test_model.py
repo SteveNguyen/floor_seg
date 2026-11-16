@@ -36,7 +36,8 @@ def test_preprocess():
 def test_hub_round_trip(tmp_path):
     model = small_model()
     model.save_pretrained(tmp_path)
-    assert json.load(open(tmp_path / "config.json")) == {"pretrained_backbone": False, "under": False}
+    assert json.load(open(tmp_path / "config.json")) == {"pretrained_backbone": False, "under": False,
+                                                          "backbone": "small"}
     assert (tmp_path / "model.safetensors").exists()
     back = load_torch(str(tmp_path))
     x = torch.randn(1, 3, IN_H, IN_W)
@@ -81,6 +82,20 @@ def test_under_model_three_channels_onnx_and_pt(tmp_path):
         np.testing.assert_allclose(floor_prob(m, bgr), floor_prob(model, bgr), atol=1e-4)
         np.testing.assert_allclose(under_prob(m, bgr), under_prob(model, bgr), atol=1e-4)
     assert under_prob(small_model(), bgr) is None  # floor-only model
+
+
+def test_large_backbone_round_trip(tmp_path):
+    # the backbone size is read back from a .pt state dict (no config), with and without the under output
+    torch.manual_seed(0)
+    for under in (False, True):
+        model = FloorNet(pretrained_backbone=False, under=under, backbone="large").eval()
+        n = sum(p.numel() for p in model.parameters())
+        assert 3.0e6 < n < 3.5e6
+        torch.save(model.state_dict(), tmp_path / "best.pt")
+        back = load_torch(str(tmp_path / "best.pt"))
+        x = torch.randn(1, 3, IN_H, IN_W)
+        with torch.no_grad():
+            assert torch.equal(model(x), back(x))
 
 
 def test_logit_threshold_equals_softmax_threshold():
