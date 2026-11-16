@@ -34,7 +34,7 @@ Split by house, as in `floor_seg/train.py`: house id % 10 == 0 is validation (un
 
 | File | Content |
 |---|---|
-| `h0.tar` ... `h9.tar` | the views, packed by the first digit of the 5-digit house id (the Hub allows 10,000 files per folder) |
+| `h0.tar` ... `h9.tar` | the views, packed by thousands of the house id: `h<d>.tar` holds houses d000-d999 (`h0<d>*` files; the Hub allows 10,000 files per folder) |
 | `stats.jsonl` | one JSON line per view (fields below) |
 | `reachy_mini_camera.json` | lens calibration the views were rendered with (1280 x 720, OpenCV rational model; at 640 x 360 use K / 2) |
 
