@@ -69,7 +69,7 @@ cp thor_v3_tar/stats.jsonl thor_v3/
 
 ## How it was made
 
-`floor_seg/thor_render.py`, floor_seg repo branch `thor-v3-labels` (rendering code as of commit `83cd3bd`), seed 0,
+`floor_seg/thor_render.py`, floor_seg repo branch `thor-v3-labels` (rendering code as of commit `35ae8a7`), seed 0,
 `--houses 2000 --views 5`, rendered in 6 parallel shards (`--shard I 6`), AI2-THOR 5.0 CloudRendering.
 
 Per house: clutter objects from the AI2-THOR asset set (boxes, pillows, toys, shoes, bins, plants, stools,
