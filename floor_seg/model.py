@@ -2,7 +2,8 @@
 
 Chosen for the Reachy Mini's CM4: fp32 with ONNX Runtime, 1 thread, runs at ~9 Hz (see README).
 Input: N x 3 x H x W, RGB, ImageNet-normalized, H x W = 192 x 320. Output: N x 2 x H x W logits
-(0 = not floor, 1 = floor). Recommended decision: floor where softmax(logits)[1] > 0.8.
+(0 = not floor, 1 = floor), or N x 3 x H x W with FloorNet(under=True) (2 = "under" logit, see FloorNet).
+Recommended decision: floor where softmax(logits[:2])[1] > 0.8.
 
 Hugging Face Hub: FloorNet.save_pretrained(dir) writes model.safetensors + config.json,
 FloorNet.from_pretrained(repo_id or dir) loads them (huggingface_hub.PyTorchModelHubMixin).
@@ -36,12 +37,15 @@ class FloorNet(torch.nn.Module, PyTorchModelHubMixin, library_name="floor_seg", 
     """Returns the logits tensor only (torchvision returns a dict), for training and ONNX export.
 
     pretrained_backbone: start from torchvision's ImageNet-1k MobileNetV3-Small weights (training only;
-    loading a trained model never needs them). The mixin stores this argument in config.json.
+    loading a trained model never needs them). The mixin stores the arguments in config.json.
+    under: a third output channel, the "under" logit (sigmoid > 0.5: this floor pixel has something lower than
+    the robot above it, e.g. under a bed; meaningful on floor pixels only). Channels 0-1 stay the floor logits,
+    so code reading floor as softmax(z[:2])[1] or z[1] - z[0] works unchanged with either model.
     """
 
-    def __init__(self, pretrained_backbone=True):
+    def __init__(self, pretrained_backbone=True, under=False):
         super().__init__()
-        self.m = lraspp_small(pretrained_backbone)
+        self.m = lraspp_small(pretrained_backbone, num_classes=3 if under else 2)
 
     def forward(self, x):
         return self.m(x)["out"]
@@ -50,8 +54,10 @@ class FloorNet(torch.nn.Module, PyTorchModelHubMixin, library_name="floor_seg", 
 def load_torch(path):
     """FloorNet in eval mode from a .pt state dict, a local save_pretrained folder or a Hub repo id."""
     if path.endswith(".pt"):
-        model = FloorNet(pretrained_backbone=False)
-        model.load_state_dict(torch.load(path, map_location="cpu"))
+        sd = torch.load(path, map_location="cpu")
+        under = sd["m.classifier.low_classifier.weight"].shape[0] == 3  # a .pt has no config: read the head size
+        model = FloorNet(pretrained_backbone=False, under=under)
+        model.load_state_dict(sd)
     else:  # pretrained_backbone=False overrides config.json: no ImageNet download, all weights come from the file
         model = FloorNet.from_pretrained(path, pretrained_backbone=False, strict=True)
     return model.eval()

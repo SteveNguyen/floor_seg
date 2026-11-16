@@ -1,4 +1,5 @@
-"""Export a trained FloorNet to ONNX (fp32, opset 17, fixed 1 x 3 x 192 x 320 input "input", output "logits").
+"""Export a trained FloorNet to ONNX (fp32, opset 17, fixed 1 x 3 x 192 x 320 input "input", output "logits":
+1 x 2 x 192 x 320, or 1 x 3 x 192 x 320 for an under model; channels 0-1 are the floor logits either way).
 
     python -m floor_seg.export_onnx --model models/floor_v2/best.pt --out floor.onnx
 

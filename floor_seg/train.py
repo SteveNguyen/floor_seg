@@ -10,6 +10,11 @@ With --tex, floors are first retextured (tiles, rugs, sun patches: floor_seg/flo
 calibration the renders were made with (--calib, default: the bundled Reachy Mini calibration).
 Metrics on validation: floor IoU, and false-floor rate = obstacle pixels predicted as floor / obstacle
 pixels (the error that drives the robot into things).
+--under (thor_v3 renders, with _under.png): 3-channel model, the third channel says "floor with something lower
+than the robot above it" (see model.FloorNet); its loss is on floor pixels only, its metrics (under IoU,
+precision, recall) are reported but best.pt is still chosen on floor IoU.
+
+    python -m floor_seg.train --data data/synth/thor_v3 --out models/floor_v5_under --tex data/textures/ambientcg --under
 Saves best.pt (by floor IoU), last.pt, floor.onnx (fp32, from best) and metrics.jsonl.
 """
 import argparse
@@ -29,15 +34,38 @@ from floor_seg.floor_tex import FloorTex
 from floor_seg.model import IN_H, IN_W, MEAN, STD, FloorNet
 
 cv2.setNumThreads(1)  # parallelism comes from DataLoader workers; per-worker OpenCV threads only contend
-IGNORE = 255  # label for pixels without ground truth (rotation corners)
 ROT_P, ROT_DEG = 0.7, 15.0
+# One label image carries both masks, so every geometric augmentation transforms them together:
+NOT_FLOOR, FLOOR, UNDER, FLOOR_NA = 0, 1, 2, 3  # UNDER = floor with something low above it; FLOOR_NA = floor,
+IGNORE = 255                                     # 'under' unknown (no _under.png, e.g. thor_v1); IGNORE: no label
+
+
+def encode_labels(floor, under=None):
+    """floor, under: 0/1 masks -> one uint8 label image (NOT_FLOOR / FLOOR / UNDER, or FLOOR_NA if under is None)."""
+    if under is None:
+        return (floor * FLOOR_NA).astype(np.uint8)
+    return (floor * np.where(under > 0, UNDER, FLOOR)).astype(np.uint8)
+
+
+def seg_loss(logits, lab, w_under=1.0):
+    """Floor: cross-entropy on channels 0-1 (target: any floor label). Under (3-channel model): binary
+    cross-entropy on channel 2, on pixels labelled FLOOR or UNDER only (not on obstacles, unknown or ignored)."""
+    floor_t = torch.where(lab == IGNORE, lab, (lab != NOT_FLOOR).long())
+    loss = torch.nn.functional.cross_entropy(logits[:, :2], floor_t, ignore_index=IGNORE)
+    if logits.shape[1] > 2:
+        m = (lab == FLOOR) | (lab == UNDER)
+        if m.any():
+            loss = loss + w_under * torch.nn.functional.binary_cross_entropy_with_logits(
+                logits[:, 2][m].float(), (lab[m] == UNDER).float())
+    return loss
 
 
 class Renders(Dataset):
-    def __init__(self, root, names, train, poses=None, ftex=None):
-        """poses: name -> (pitch deg, roll deg, camera height m); ftex: FloorTex for floor retexturing (train only, needs poses)."""
+    def __init__(self, root, names, train, poses=None, ftex=None, under=False):
+        """poses: name -> (pitch deg, roll deg, camera height m); ftex: FloorTex for floor retexturing (train only,
+        needs poses); under: also read <name>_under.png (labels: encode_labels)."""
         self.root, self.names, self.train = root, names, train
-        self.poses, self.ftex = poses, ftex
+        self.poses, self.ftex, self.under = poses, ftex, under
 
     def __len__(self):
         return len(self.names)
@@ -84,13 +112,17 @@ class Renders(Dataset):
     def __getitem__(self, i):
         base = os.path.join(self.root, self.names[i])
         img = cv2.imread(base + ".jpg")  # BGR
-        mask = (cv2.imread(base + "_floor.png", 0) > 127).astype(np.uint8)  # 0 / 1, IGNORE added by augment
+        floor = (cv2.imread(base + "_floor.png", 0) > 127).astype(np.uint8)
+        mask = floor  # 0 / 1, IGNORE added by augment
+        if self.under:
+            u = cv2.imread(base + "_under.png", 0)
+            mask = encode_labels(floor, None if u is None else (u > 127).astype(np.uint8))
         if self.train:
             rng = random.Random(random.getrandbits(32))
             if self.ftex is not None:  # first, while pixels still match the stored depth and pose
                 depth = cv2.imread(base + "_depth.png", cv2.IMREAD_UNCHANGED)
                 pitch, roll, h = self.poses[self.names[i]]
-                img = self.ftex.apply(img, mask, depth, pitch, roll, rng, cam_h=h)
+                img = self.ftex.apply(img, floor, depth, pitch, roll, rng, cam_h=h)
             img, mask = self.augment(img, mask, rng)
         img = cv2.resize(img, (IN_W, IN_H), interpolation=cv2.INTER_AREA)[:, :, ::-1].astype(np.float32) / 255
         mask = cv2.resize(mask, (IN_W, IN_H), interpolation=cv2.INTER_NEAREST)
@@ -99,17 +131,30 @@ class Renders(Dataset):
 
 
 def evaluate(model, loader, dev):
+    """Floor: IoU, false-floor and missed-floor rates (labels 0 = not floor, any other floor label = floor).
+    Under (3-channel model): IoU, precision, recall of sigmoid > 0.5 over GT FLOOR / UNDER pixels."""
     model.eval()
     tp = fp = fn = obst = 0
+    utp = ufp = ufn = 0
     with torch.no_grad(), torch.autocast("cuda", dtype=torch.float16):
         for x, y in loader:
-            pred = model(x.to(dev)).argmax(1).cpu()
-            tp += ((pred == 1) & (y == 1)).sum().item()
-            fp += ((pred == 1) & (y == 0)).sum().item()
-            fn += ((pred == 0) & (y == 1)).sum().item()
-            obst += (y == 0).sum().item()
-    return {"floor_iou": tp / max(tp + fp + fn, 1), "false_floor_rate": fp / max(obst, 1),
-            "missed_floor_rate": fn / max(tp + fn, 1)}
+            z = model(x.to(dev)).float().cpu()
+            pred = z[:, :2].argmax(1)
+            gt = (y != NOT_FLOOR) & (y != IGNORE)
+            tp += ((pred == 1) & gt).sum().item()
+            fp += ((pred == 1) & (y == NOT_FLOOR)).sum().item()
+            fn += ((pred == 0) & gt).sum().item()
+            obst += (y == NOT_FLOOR).sum().item()
+            if z.shape[1] > 2:
+                m = (y == FLOOR) | (y == UNDER)
+                pu, gu = (z[:, 2] > 0)[m], (y == UNDER)[m]
+                utp, ufp, ufn = utp + (pu & gu).sum().item(), ufp + (pu & ~gu).sum().item(), ufn + (~pu & gu).sum().item()
+    m = {"floor_iou": tp / max(tp + fp + fn, 1), "false_floor_rate": fp / max(obst, 1),
+         "missed_floor_rate": fn / max(tp + fn, 1)}
+    if utp + ufp + ufn:
+        m.update(under_iou=utp / (utp + ufp + ufn), under_precision=utp / max(utp + ufp, 1),
+                 under_recall=utp / max(utp + ufn, 1))
+    return m
 
 
 def main():
@@ -123,6 +168,8 @@ def main():
     ap.add_argument("--tex", help="texture root (data/textures/ambientcg): enables floor retexturing")
     ap.add_argument("--calib", default=DEFAULT_CALIB, help="lens calibration the renders were made with (for --tex)")
     ap.add_argument("--kinds", nargs="+", help="keep only these view kinds of stats.jsonl (thor_v2: floor, table)")
+    ap.add_argument("--under", action="store_true", help="3-channel model with the 'under' output (needs _under.png)")
+    ap.add_argument("--w-under", type=float, default=1.0, help="weight of the under loss (with --under)")
     args = ap.parse_args()
     os.makedirs(args.out, exist_ok=True)
     random.seed(0)
@@ -136,16 +183,16 @@ def main():
     print(f"train {len(train_names)} views, val {len(val_names)} views (by house)", flush=True)
     ftex = FloorTex(args.tex, args.calib) if args.tex else None
     poses = {s["name"]: (s["pitch"], s["roll"], s["h"]) for s in stats}
-    tl = DataLoader(Renders(args.data, train_names, True, poses, ftex), batch_size=args.batch, shuffle=True,
-                    num_workers=args.workers, drop_last=True, persistent_workers=True)
-    vl = DataLoader(Renders(args.data, val_names, False), batch_size=args.batch, num_workers=args.workers)
+    tl = DataLoader(Renders(args.data, train_names, True, poses, ftex, under=args.under), batch_size=args.batch,
+                    shuffle=True, num_workers=args.workers, drop_last=True, persistent_workers=True)
+    vl = DataLoader(Renders(args.data, val_names, False, under=args.under), batch_size=args.batch,
+                    num_workers=args.workers)
 
     dev = "cuda"
-    model = FloorNet().to(dev)
+    model = FloorNet(under=args.under).to(dev)
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
     sched = torch.optim.lr_scheduler.OneCycleLR(opt, max_lr=args.lr, total_steps=args.epochs * len(tl), pct_start=0.1)
     scaler = torch.amp.GradScaler()
-    loss_fn = torch.nn.CrossEntropyLoss(ignore_index=IGNORE)
     best = -1.0
     log = open(os.path.join(args.out, "metrics.jsonl"), "w")
     for ep in range(args.epochs):
@@ -154,7 +201,7 @@ def main():
         for x, y in tl:
             x, y = x.to(dev, non_blocking=True), y.to(dev, non_blocking=True)
             with torch.autocast("cuda", dtype=torch.float16):
-                loss = loss_fn(model(x), y)
+                loss = seg_loss(model(x), y, args.w_under)
             opt.zero_grad(set_to_none=True)
             scaler.scale(loss).backward()
             scaler.step(opt)
@@ -165,8 +212,10 @@ def main():
         m.update(epoch=ep, loss=tot / len(tl), s=round(time.time() - t0, 1))
         log.write(json.dumps(m) + "\n")
         log.flush()
+        under = (f" | under IoU {m['under_iou']:.4f} P {m['under_precision']:.3f} R {m['under_recall']:.3f}"
+                 if "under_iou" in m else "")
         print(f"ep {ep:2d} loss {m['loss']:.4f} | val floor IoU {m['floor_iou']:.4f} false-floor "
-              f"{m['false_floor_rate']:.4f} missed-floor {m['missed_floor_rate']:.4f} | {m['s']} s", flush=True)
+              f"{m['false_floor_rate']:.4f} missed-floor {m['missed_floor_rate']:.4f}{under} | {m['s']} s", flush=True)
         torch.save(model.state_dict(), os.path.join(args.out, "last.pt"))
         if m["floor_iou"] > best:
             best = m["floor_iou"]

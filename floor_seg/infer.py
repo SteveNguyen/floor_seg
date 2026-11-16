@@ -22,9 +22,23 @@ def load_model(path):
     return OnnxModel(path) if path.endswith(".onnx") else load_torch(path)
 
 
-def floor_prob(model, bgr):
-    """Floor probability (float32, 0..1) for every pixel of a BGR image, at the image's own size."""
+def _logits(model, bgr):
     with torch.no_grad():
-        logits = model(torch.from_numpy(preprocess(np.ascontiguousarray(bgr[:, :, ::-1]))))[0]
-    prob = torch.softmax(logits, 0)[1].numpy()
+        return model(torch.from_numpy(preprocess(np.ascontiguousarray(bgr[:, :, ::-1]))))[0]
+
+
+def floor_prob(model, bgr):
+    """Floor probability (float32, 0..1) for every pixel of a BGR image, at the image's own size. Channels 0-1
+    only: works for 2- and 3-channel (under) models."""
+    prob = torch.softmax(_logits(model, bgr)[:2], 0)[1].numpy()
+    return cv2.resize(prob, (bgr.shape[1], bgr.shape[0]), interpolation=cv2.INTER_LINEAR)
+
+
+def under_prob(model, bgr):
+    """'Under' probability (float32, 0..1; meaningful on floor pixels) at the image's own size, or None for a
+    floor-only model."""
+    z = _logits(model, bgr)
+    if z.shape[0] < 3:
+        return None
+    prob = torch.sigmoid(z[2]).numpy()
     return cv2.resize(prob, (bgr.shape[1], bgr.shape[0]), interpolation=cv2.INTER_LINEAR)

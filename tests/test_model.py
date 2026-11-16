@@ -36,7 +36,7 @@ def test_preprocess():
 def test_hub_round_trip(tmp_path):
     model = small_model()
     model.save_pretrained(tmp_path)
-    assert json.load(open(tmp_path / "config.json")) == {"pretrained_backbone": False}
+    assert json.load(open(tmp_path / "config.json")) == {"pretrained_backbone": False, "under": False}
     assert (tmp_path / "model.safetensors").exists()
     back = load_torch(str(tmp_path))
     x = torch.randn(1, 3, IN_H, IN_W)
@@ -63,6 +63,24 @@ def test_onnx_export_matches_torch(tmp_path):
     p_torch, p_onnx = floor_prob(model, bgr), floor_prob(OnnxModel(path), bgr)
     assert p_torch.shape == (360, 640)
     np.testing.assert_allclose(p_torch, p_onnx, atol=1e-4)
+
+
+def test_under_model_three_channels_onnx_and_pt(tmp_path):
+    from floor_seg.infer import under_prob
+
+    torch.manual_seed(0)
+    model = FloorNet(pretrained_backbone=False, under=True).eval()
+    with torch.no_grad():
+        assert model(torch.zeros(1, 3, IN_H, IN_W)).shape == (1, 3, IN_H, IN_W)
+    torch.save(model.state_dict(), tmp_path / "best.pt")
+    back = load_torch(str(tmp_path / "best.pt"))  # head size read from the state dict
+    path = str(tmp_path / "floor.onnx")
+    export(model, path)
+    bgr = np.random.default_rng(0).integers(0, 256, (360, 640, 3), np.uint8)
+    for m in (back, OnnxModel(path)):
+        np.testing.assert_allclose(floor_prob(m, bgr), floor_prob(model, bgr), atol=1e-4)
+        np.testing.assert_allclose(under_prob(m, bgr), under_prob(model, bgr), atol=1e-4)
+    assert under_prob(small_model(), bgr) is None  # floor-only model
 
 
 def test_logit_threshold_equals_softmax_threshold():
