@@ -43,6 +43,31 @@ def test_floor_coords_flat_floor():
     assert np.abs(gx).max() < 0.05
 
 
+def test_texture_swap_negatives_touch_only_low_obstacle_surfaces(tmp_path, monkeypatch):
+    # with the camera height, obstacle surfaces (split at depth edges) reaching below NEG_MAX_H may get a floor
+    # texture; floor pixels and surfaces entirely above NEG_MAX_H never change (labels never change at all)
+    import floor_seg.floor_tex as ftm
+    monkeypatch.setattr(ftm, "P_NEG", 1.0)
+    monkeypatch.setattr(ftm, "P_RETEX", 0.0)
+    monkeypatch.setattr(ftm, "P_RUG", 0.0)
+    monkeypatch.setattr(ftm, "P_SUN", 0.0)
+    monkeypatch.setattr(ftm, "P_GLARE", 0.0)
+    (tmp_path / "floor").mkdir()
+    cv2.imwrite(str(tmp_path / "floor" / "t.jpg"), np.random.default_rng(1).integers(0, 256, (64, 64, 3), np.uint8))
+    ft = FloorTex(str(tmp_path), DEFAULT_CALIB)
+    bgr = np.full((360, 640, 3), 128, np.uint8)
+    floor = np.zeros((360, 640), np.uint8)
+    floor[200:] = 1
+    depth = np.full((360, 640), 1500, np.uint16)  # rows 100-199: near surface reaching low
+    depth[:100] = 4000                            # rows 0-99: far surface, all of it high (depth edge between)
+    hgt = ftm.heights(ft.xn, ft.yn, depth / 1000.0, 0.0, 0.0, 0.3)
+    assert hgt[:100].min() > ftm.NEG_MAX_H and hgt[101:200].min() < ftm.NEG_MAX_H
+    out = ft.apply(bgr, floor, depth, 0.0, 0.0, random.Random(0), cam_h=0.3)
+    diff = np.abs(out.astype(int) - bgr).max(axis=2)
+    assert diff[:100].max() <= 1 and diff[200:].max() <= 1
+    assert (diff[101:200] > 1).mean() > 0.5
+
+
 def test_retexturing_keeps_non_floor_pixels(tmp_path):
     # labels never change; pixels outside the floor mask must stay as rendered (+-1 for float rounding)
     for g in ("floor", "rug"):

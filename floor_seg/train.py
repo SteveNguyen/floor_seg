@@ -35,7 +35,7 @@ ROT_P, ROT_DEG = 0.7, 15.0
 
 class Renders(Dataset):
     def __init__(self, root, names, train, poses=None, ftex=None):
-        """poses: name -> (pitch, roll) deg; ftex: FloorTex for floor retexturing (train only, needs poses)."""
+        """poses: name -> (pitch deg, roll deg, camera height m); ftex: FloorTex for floor retexturing (train only, needs poses)."""
         self.root, self.names, self.train = root, names, train
         self.poses, self.ftex = poses, ftex
 
@@ -89,7 +89,8 @@ class Renders(Dataset):
             rng = random.Random(random.getrandbits(32))
             if self.ftex is not None:  # first, while pixels still match the stored depth and pose
                 depth = cv2.imread(base + "_depth.png", cv2.IMREAD_UNCHANGED)
-                img = self.ftex.apply(img, mask, depth, *self.poses[self.names[i]], rng)
+                pitch, roll, h = self.poses[self.names[i]]
+                img = self.ftex.apply(img, mask, depth, pitch, roll, rng, cam_h=h)
             img, mask = self.augment(img, mask, rng)
         img = cv2.resize(img, (IN_W, IN_H), interpolation=cv2.INTER_AREA)[:, :, ::-1].astype(np.float32) / 255
         mask = cv2.resize(mask, (IN_W, IN_H), interpolation=cv2.INTER_NEAREST)
@@ -121,17 +122,20 @@ def main():
     ap.add_argument("--workers", type=int, default=8)
     ap.add_argument("--tex", help="texture root (data/textures/ambientcg): enables floor retexturing")
     ap.add_argument("--calib", default=DEFAULT_CALIB, help="lens calibration the renders were made with (for --tex)")
+    ap.add_argument("--kinds", nargs="+", help="keep only these view kinds of stats.jsonl (thor_v2: floor, table)")
     args = ap.parse_args()
     os.makedirs(args.out, exist_ok=True)
     random.seed(0)
     torch.manual_seed(0)
 
     stats = [json.loads(line) for line in open(os.path.join(args.data, "stats.jsonl"))]
+    if args.kinds:  # thor_v1 has no "kind": all its views are floor views
+        stats = [s for s in stats if s.get("kind", "floor") in args.kinds]
     train_names = [s["name"] for s in stats if s["house"] % 10 != 0]
     val_names = [s["name"] for s in stats if s["house"] % 10 == 0]
     print(f"train {len(train_names)} views, val {len(val_names)} views (by house)", flush=True)
     ftex = FloorTex(args.tex, args.calib) if args.tex else None
-    poses = {s["name"]: (s["pitch"], s["roll"]) for s in stats}
+    poses = {s["name"]: (s["pitch"], s["roll"], s["h"]) for s in stats}
     tl = DataLoader(Renders(args.data, train_names, True, poses, ftex), batch_size=args.batch, shuffle=True,
                     num_workers=args.workers, drop_last=True, persistent_workers=True)
     vl = DataLoader(Renders(args.data, val_names, False), batch_size=args.batch, num_workers=args.workers)

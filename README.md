@@ -8,7 +8,12 @@ robot's CM4 at ~9 Hz in fp32 with ONNX Runtime.
 - Dataset (planned): [pollen-robotics/reachy-mini-floor-synth](https://huggingface.co/datasets/pollen-robotics/reachy-mini-floor-synth) — card: [DATASET_CARD.md](DATASET_CARD.md)
 
 **Label rule:** anything more than 1 cm above the floor is an obstacle; cables, door thresholds, rug edges and
-rug surfaces are floor.
+rug surfaces are floor. From the thor_v3 renders on, each view has a second mask, `_under.png`: floor pixels
+with something lower than 0.45 m above them (bed, sofa, chair seat, low table; the robot is <= 0.40 m tall),
+measured from the scene geometry (a depth render from below the floor), not from object boxes. The floor mask
+keeps them: mixing "under" into the floor label made the model doubt plain open floor (thor_v2 experiment). In
+views from a table top, the top is floor and the room floor below is not (see
+[floor_seg/thor_render.py](floor_seg/thor_render.py)).
 
 ## Results (v2: ProcTHOR renders + floor retexturing)
 

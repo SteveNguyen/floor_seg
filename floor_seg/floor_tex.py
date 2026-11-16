@@ -6,10 +6,11 @@ multiplied by the render's own floor shading (light falloff, object shadows) and
 only (objects keep occluding it). Labels do not change: rugs and sun patches are floor (rule: <= 1 cm).
 
 Variations (independent draws): whole floor retextured (ambientCG CC0 photos or procedural tiles),
-0-2 rugs, a hard-edged sun patch, soft glare from a window on a glossy floor.
+0-2 rugs, a hard-edged sun patch, soft glare from a window on a glossy floor; with the camera height, low
+obstacle surfaces retextured with a floor texture (negatives: labels stay obstacle).
 
     ft = FloorTex("data/textures/ambientcg", floor_seg.DEFAULT_CALIB)
-    bgr = ft.apply(bgr, floor01, depth_mm, pitch_deg, roll_deg, random.Random())
+    bgr = ft.apply(bgr, floor01, depth_mm, pitch_deg, roll_deg, random.Random(), cam_h=h_m)
 
 Texture root layout: <root>/<group>/*.jpg, groups floor, terrazzo, marble, stone, concrete, wood, rug
 (list of the ambientCG assets used: floor_seg/assets/ambientcg_textures.md).
@@ -25,6 +26,10 @@ import numpy as np
 W, H = 640, 360           # render size (floor_seg/thor_render.py)
 P_RETEX, P_RUG, P_SUN, P_GLARE = 0.6, 0.35, 0.25, 0.2
 P_PROCEDURAL = 0.3        # share of retextured floors drawn as procedural tiles instead of photos
+P_NEG = 0.3               # texture-swap negatives: low obstacle surfaces get a floor texture too
+NEG_MAX_H = 0.6           # m, obstacle surfaces reaching below this height can be retextured (bed frames, steps,
+                          # boxes, walls)
+NEG_MIN_PX = 300          # smallest connected surface retextured
 LEVELS = 5                # texture mip levels (1024 .. 64 px)
 
 
@@ -48,6 +53,14 @@ def floor_coords(xn, yn, depth_m, pitch_deg, roll_deg):
     x1 = x * math.cos(r) - y * math.sin(r)
     y1 = x * math.sin(r) + y * math.cos(r)
     return x1, z * math.cos(p) + y1 * math.sin(p)
+
+
+def heights(xn, yn, depth_m, pitch_deg, roll_deg, cam_h):
+    """Height (m) above the floor of each pixel's 3D point (same conventions as floor_coords)."""
+    x, y, z = xn * depth_m, -yn * depth_m, depth_m
+    r, p = math.radians(roll_deg), math.radians(pitch_deg)
+    y1 = x * math.sin(r) + y * math.cos(r)
+    return cam_h + y1 * math.cos(p) - z * math.sin(p)
 
 
 def pyramid(tex):
@@ -122,11 +135,13 @@ class FloorTex:
                 "concrete": (1.0, 3.0), "wood": (1.0, 3.0), "rug": (0.3, 1.2)}[group]
         return tex, rng.uniform(*size)
 
-    def apply(self, bgr, floor, depth_mm, pitch, roll, rng):
+    def apply(self, bgr, floor, depth_mm, pitch, roll, rng, cam_h=None):
+        """cam_h (m, camera height above the floor) enables the texture-swap negatives."""
         m = (floor > 0) & (depth_mm > 0)
         if m.mean() < 0.05:
             return bgr
-        gx, gz = floor_coords(self.xn, self.yn, depth_mm.astype(np.float32) / 1000, pitch, roll)
+        depth_m = depth_mm.astype(np.float32) / 1000
+        gx, gz = floor_coords(self.xn, self.yn, depth_m, pitch, roll)
         img = bgr.astype(np.float32) / 255
         mf = m.astype(np.float32)
         # floor shading: blurred floor luminance (masked normalized blur), relative to its median
@@ -134,6 +149,7 @@ class FloorTex:
         lb = cv2.GaussianBlur(lum * mf, (0, 0), 4) / np.maximum(cv2.GaussianBlur(mf, (0, 0), 4), 1e-3)
         shade = np.clip(lb / max(np.median(lb[m]), 1e-3), 0.15, 2.5)[..., None]
         out = img.copy()
+        tex = None
         if rng.random() < P_RETEX:
             if rng.random() < P_PROCEDURAL:
                 tex, size = procedural_tiles(rng)
@@ -143,6 +159,32 @@ class FloorTex:
             # tint + brightness; capped at 1.1 so bright textures do not clip away the object shadows
             col = col * np.array([rng.uniform(0.8, 1.2) for _ in range(3)], np.float32) * rng.uniform(0.5, 1.1)
             out[m] = (col * shade)[m]
+        if cam_h is not None and self.floor_groups and rng.random() < P_NEG:
+            # Texture-swap negatives: a wooden bed frame on a wooden floor was called floor (hb_nav ISSUES #37).
+            # 1-3 obstacle surfaces reaching below NEG_MAX_H get the floor's texture (or another floor texture),
+            # with their own shading, so the texture alone cannot mean floor: the model has to use geometry and
+            # context. Surfaces = obstacle pixels split at depth edges (> 3 % per pixel), retextured whole (no
+            # seam at a height cut). Texture coords: gx + gz runs along any vertical face, the height runs up it.
+            hgt = heights(self.xn, self.yn, depth_m, pitch, roll, cam_h)
+            ld = np.log(np.maximum(depth_m, 1e-3))
+            edge = np.zeros(ld.shape, bool)
+            edge[:, 1:] |= np.abs(np.diff(ld, axis=1)) > 0.03
+            edge[1:] |= np.abs(np.diff(ld, axis=0)) > 0.03
+            surf = (floor == 0) & (depth_mm > 0) & ~edge
+            n, lab, st, _ = cv2.connectedComponentsWithStats(surf.astype(np.uint8), connectivity=4)
+            minh = np.full(n, np.inf)
+            np.minimum.at(minh, lab[surf], hgt[surf])
+            comps = [k for k in range(1, n) if st[k, cv2.CC_STAT_AREA] >= NEG_MIN_PX and minh[k] < NEG_MAX_H]
+            if comps:
+                if tex is None:
+                    tex, size = self.load(rng.choice(self.floor_groups), rng)
+                col = self.sample(pyramid(tex), gx + gz, hgt, size, rng) * rng.uniform(0.5, 1.1)
+                for k in rng.sample(comps, min(len(comps), rng.randint(1, 3))):
+                    c = lab == k
+                    cf = c.astype(np.float32)
+                    lb = cv2.GaussianBlur(lum * cf, (0, 0), 4) / np.maximum(cv2.GaussianBlur(cf, (0, 0), 4), 1e-3)
+                    sh = np.clip(lb / max(np.median(lb[c]), 1e-3), 0.15, 2.5)[..., None]
+                    out[c] = (col * sh)[c]
         if self.tex["rug"] and rng.random() < P_RUG:
             for _ in range(rng.choice([1, 1, 2])):
                 ys, xs = np.nonzero(m)
