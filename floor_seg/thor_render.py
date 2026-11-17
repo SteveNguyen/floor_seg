@@ -32,7 +32,8 @@ image with the same focal length is rendered and remapped (RGB bilinear, mask an
 Noise / blur / colour jitter are left to training-time augmentation.
 
 Output per view: <name>.jpg (RGB), <name>_floor.png and <name>_under.png (0/255), <name>_depth.png (uint16
-mm, optical z); one JSON line per view in stats.jsonl (written as it goes; re-running skips houses already
+mm, optical z), floor views also <name>_above.png (uint16 mm: height of the lowest surface above each floor
+pixel, for metrics at other clearances; see shoot); one JSON line per view in stats.jsonl (written as it goes; re-running skips houses already
 done). --plans: one top-down QA plan per house (plan_image).
 """
 import argparse
@@ -64,6 +65,7 @@ UNDER_FOV = 20.0      # deg (vertical): nearly vertical rays (<= ~18 deg off at 
 STRUCTURE = {"Floor", "Wall", "Doorway", "Doorframe", "Window", "Painting"}  # not named on the QA plan
 STRUCTURE_IDS = ("wall", "door", "window")  # instance ids seen from below that are not overhangs
 CONTACT_M = 0.03      # m: a lowest surface below this rests on the floor (covers it), it is not an overhang
+ABOVE_NONE = 65535    # _above.png value: height above unknown (or > 65 m)
 # table views
 SUPPORT_TYPES = {"DiningTable", "CounterTop", "SideTable", "TVStand", "CoffeeTable"}
 SUPPORT_MIN = (0.6, 0.45)  # m, smallest top (long x short side) the base can stand on
@@ -193,6 +195,14 @@ class UndersideMap:
         out[ok] = self.grid[i[ok], j[ok]]
         return out
 
+    def lookup_h(self, x, z):
+        """Height (m) of the lowest surface above world (x, z), after finish()'s fill; inf outside the raster
+        or where unknown. Raw geometry: no gap closing or pockets (those only shape the 'under' mask)."""
+        i, j, ok = self._ij(x, z)
+        out = np.full(np.shape(x), np.inf, np.float32)
+        out[ok] = np.where(self.unknown[i[ok], j[ok]], np.inf, self.h[i[ok], j[ok]])
+        return out
+
 
 def house_bounds(reach, objects, margin=0.5):
     """(xmin, zmin, xmax, zmax) of everything in the house: reachable cells and every object's box. Any floor
@@ -289,7 +299,9 @@ def support_tops(objects):
 def shoot(ctrl, lens, kind, x, z, support, h, pitch, yaw, roll, um=None, support_ids=None):
     """Render one view with the camera h above the support plane (height `support`: 0 = room floor, else a
     table top) and label it (floor and under masks of the module docstring; under from the UndersideMap um).
-    Returns (rgb, floor 0/1, under 0/1, depth_mm, info) at the output lens, or None if the view is rejected.
+    Returns (rgb, floor 0/1, under 0/1, depth_mm, above_mm, info) at the output lens, or None if the view is
+    rejected. above_mm (uint16): on floor pixels, height of the lowest surface above (mm, ABOVE_NONE where
+    unknown or beyond 65 m); 0 elsewhere. It lets a metric use another clearance than CLEARANCE.
     info: agree (rule 1 vs 2 IoU), under_frac (share of the floor pixels that are under).
     """
     map_x, map_y, f, vfov = lens
@@ -319,18 +331,23 @@ def shoot(ctrl, lens, kind, x, z, support, h, pitch, yaw, roll, um=None, support
         agree = (geo_r & ids_r).sum() / max(geo_r.sum(), 1)
     lab_r = geo_r & ids_r
     under_r = np.zeros_like(lab_r)
+    above_r = np.zeros(lab_r.shape, np.uint16)
     info = dict(agree=float(agree), under_frac=0.0)
     if um is not None:  # a separate label, the floor label keeps these pixels
         wx, wz = world_xz(depth_r, f, x, z, yaw, pitch, roll)
         under_r = lab_r & um.lookup(wx, wz)
         info["under_frac"] = float(under_r.sum() / max(lab_r.sum(), 1))  # share of the floor pixels
+        hgt = um.lookup_h(wx, wz)
+        above_r = np.where(lab_r, np.where(np.isfinite(hgt), np.clip(hgt * 1000, 1, ABOVE_NONE - 1), ABOVE_NONE),
+                           0).astype(np.uint16)
     floor = cv2.remap(lab_r.astype(np.uint8), map_x, map_y, cv2.INTER_NEAREST)
     if floor.mean() < MIN_FLOOR[kind] or agree < MIN_AGREE:
         return None
     under_lab = cv2.remap(under_r.astype(np.uint8), map_x, map_y, cv2.INTER_NEAREST)
     rgb = cv2.remap(rgb_r, map_x, map_y, cv2.INTER_LINEAR)
     depth_mm = cv2.remap(np.clip(depth_r * 1000, 0, 65535).astype(np.uint16), map_x, map_y, cv2.INTER_NEAREST)
-    return rgb, floor, under_lab, depth_mm, info
+    above_mm = cv2.remap(above_r, map_x, map_y, cv2.INTER_NEAREST)
+    return rgb, floor, under_lab, depth_mm, above_mm, info
 
 
 def add_clutter(house, reach, by_type, rng):
@@ -444,7 +461,7 @@ def main():
         shots = []  # (name, x, z, yaw) of the floor views, for the QA plan
 
         def save(kind, k, view, x, z, support, h, pitch, yaw, roll):
-            rgb, floor, under, depth_mm, info = view
+            rgb, floor, under, depth_mm, above_mm, info = view
             name = f"h{hi:05d}_{k}" if kind == "floor" else f"h{hi:05d}_t{k}"
             if kind == "floor":
                 shots.append((name[-1], x, z, yaw))
@@ -452,6 +469,8 @@ def main():
             cv2.imwrite(os.path.join(args.out, name + "_floor.png"), floor * 255)
             cv2.imwrite(os.path.join(args.out, name + "_under.png"), under * 255)
             cv2.imwrite(os.path.join(args.out, name + "_depth.png"), depth_mm)
+            if kind == "floor":
+                cv2.imwrite(os.path.join(args.out, name + "_above.png"), above_mm)
             stats_f.write(json.dumps(dict(name=name, house=hi, kind=kind, x=x, z=z, support=support, h=h,
                                           pitch=pitch, roll=roll, yaw=yaw, floor_frac=float(floor.mean()),
                                           n_clutter=len(placed), clutter_moved=moved,

@@ -58,6 +58,10 @@ def test_underside_map_lowest_surface_decides():
     um.finish()
     assert um.lookup(pts[:, 0], pts[:, 1]).tolist() == [True, False, False, True, False, False, True]
     assert not um.unknown[1:-1, 1:-1].any()
+    # heights for metrics at another clearance (_above.png): the lowest surface; inf outside the raster
+    hgt = um.lookup_h(np.r_[pts[:, 0], 20.0], np.r_[pts[:, 1], 0.5])
+    np.testing.assert_allclose(hgt[:7], [0.25, 1.5, 0.72, 0.42, 0.0, 2.8, 0.25], atol=1e-6)
+    assert np.isinf(hgt[7])
 
 
 def test_slatted_shelf_is_under_but_a_robot_wide_gap_is_not():
