@@ -6,6 +6,7 @@ robot's CM4 at ~9 Hz in fp32 with ONNX Runtime.
 
 - Model (planned): [pollen-robotics/reachy-mini-floor-seg](https://huggingface.co/pollen-robotics/reachy-mini-floor-seg) — card: [MODEL_CARD.md](MODEL_CARD.md)
 - Dataset (planned): [pollen-robotics/reachy-mini-floor-synth](https://huggingface.co/datasets/pollen-robotics/reachy-mini-floor-synth) — card: [DATASET_CARD.md](DATASET_CARD.md)
+- Development models (private, floor + "under" output; versions, data and scores): [DEV_MODELS.md](DEV_MODELS.md)
 
 **Label rule:** anything more than 1 cm above the floor is an obstacle; cables, door thresholds, rug edges and
 rug surfaces are floor. From the thor_v3 renders on, each view has a second mask, `_under.png`: floor pixels
@@ -55,6 +56,9 @@ x = ((x - [0.485, 0.456, 0.406]) / [0.229, 0.224, 0.225]).astype(np.float32).tra
 z = sess.run(None, {"input": x})[0][0]                                 # 2 x 192 x 320 logits
 floor = (z[1] - z[0]) > np.log(0.8 / 0.2)                              # softmax[1] > 0.8
 ```
+
+A model trained with `--under` has a third channel: `under = 1 / (1 + np.exp(-z[2])) > 0.5` (floor with something
+low above it); the floor test above is unchanged. See [DEV_MODELS.md](DEV_MODELS.md).
 
 PyTorch:
 
