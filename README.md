@@ -123,6 +123,22 @@ python scripts/build_hf_dataset.py data/synth/thor_v1 --out hf/dataset --texture
 
 Neither script uploads anything.
 
+## Real home floors dataset (public, consent-based; tools only)
+
+Homes recorded with the robot by phone teleoperation (protocol: [docs/dataset/RECORDING.md](docs/dataset/RECORDING.md),
+consent form: [docs/dataset/CONSENT.md](docs/dataset/CONSENT.md)). Keep STAGING outside the repo.
+
+```bash
+python -m floor_seg.dataset.import_run RUN_DIR STAGING --session home03   # Navette run -> subsampled session
+python -m floor_seg.dataset.privacy STAGING/home03                        # face blur (YuNet), re-encode without EXIF
+python -m floor_seg.dataset.review STAGING/home03                         # owner deletes frames (local page)
+python -m floor_seg.dataset.consent STAGING/home03 --given y --date 2026-11-20 --role owner --form-ref "..."
+python -m floor_seg.dataset.export STAGING/home03 STAGING/home04 --val home04 --out hf/real_floor   # no upload
+```
+
+Export refuses sessions without the privacy pass, the owner's review or written consent. Details:
+[floor_seg/dataset/__init__.py](floor_seg/dataset/__init__.py).
+
 ## Known limitations
 
 - **int8 post-training quantization breaks the model** (real IoU 0.68 / false floor 26 % vs 0.89 / 3.0 % fp32):
@@ -143,6 +159,7 @@ floor_seg/eval_real.py    scores on real labelled frames
 floor_seg/label_real.py   SAM2-assisted labelling of real frames
 floor_seg/predict.py      mask + overlay CLI
 floor_seg/export_onnx.py  ONNX export
+floor_seg/dataset/        real home dataset: import, privacy, review, consent, export
 scripts/                  local HF model / dataset folders
 examples/floor_live.py    on-robot benchmark (CM4)
 ```
