@@ -5,9 +5,9 @@ tags: [image-segmentation, robotics, onnx]
 
 # floor_seg development models
 
-Private working models for the Reachy Mini floor segmentation (code: the `floor_seg` repo). Not released:
-the public model is [pollen-robotics/reachy-mini-floor-seg](https://huggingface.co/pollen-robotics/reachy-mini-floor-seg)
-(planned, the v2 recipe). Each folder holds `best.pt` (state dict, chosen by synthetic val floor IoU),
+Development models for the Reachy Mini floor segmentation (code: the `floor_seg` repo), public at
+[SteveNguyen/reachy-mini-floor-seg-dev](https://huggingface.co/SteveNguyen/reachy-mini-floor-seg-dev): working
+versions, not a release. Each folder holds `best.pt` (state dict, chosen by synthetic val floor IoU),
 `last.pt`, `floor.onnx` (export of `best.pt`) and `metrics.jsonl` (one line per epoch).
 
 **Current choice for navigation: `v7_floor_under`**, floor cutoff 0.7, under cutoff 0.5.
