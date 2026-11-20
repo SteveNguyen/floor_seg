@@ -174,7 +174,7 @@ floor_seg/model.py        FloorNet (+ Hub mixin), preprocess, load_torch
 floor_seg/infer.py        ONNX / torch loader, floor probability at image size
 floor_seg/train.py        training on renders (augmentation, house split, ONNX export)
 floor_seg/floor_tex.py    floor retexturing augmentation (needs depth + pose + lens)
-floor_seg/aug_structures.py  plinths, threshold strips / steps, sun streaks (train --aug-structures)
+floor_seg/aug_structures.py  plinths, threshold strips, level changes, sun streaks (train --aug-structures)
 floor_seg/aug_preview.py  preview grid of those augmentations with labels
 floor_seg/thor_render.py  ProcTHOR / AI2-THOR renderer
 floor_seg/eval_real.py    scores on real labelled frames

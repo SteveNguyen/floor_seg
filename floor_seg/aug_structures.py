@@ -23,9 +23,29 @@ in the camera-yaw frame is (gx right, gz forward, height above the floor), all l
              p_transition the floor beyond it gets another tiling, as at a room transition). Door openings are
              not detected (renders store no door geometry); a random placement on visible floor teaches the
              same appearance cue. The strip is a box ray-traced against every pixel ray with the stored depth
-             as z-buffer: flush / low (flush_h, <= 1.2 cm) keeps the floor label (drivable, label rule); with
-             p_step a raised step (step_h, >= 2.5 cm) shows its front face and is labelled obstacle, so the
-             model has to tell them apart by geometry, not by "different material across the floor".
+             as z-buffer; flush / low (flush_h, <= 1.2 cm): keeps the floor label (drivable, label rule).
+             (A raised box strip lying on the floor was dropped: it has hardly any real equivalent; the real
+             "not drivable" case is a level change, below.)
+  level      a straight edge across the floor (same placement as the strips), beyond which the floor is dz
+             higher (step up) or lower (step down), room-wide (a door-wide one, without door jambs in the
+             render, looks like a platform / trench in the room; across a rendered doorway the room-wide edge
+             gives the real picture). Labels follow the robot's rule
+             (only floor at its own level is drivable): |dz| >= 2 cm -> riser and the floor beyond are obstacle;
+             with p_level_flat |dz| <= 1 cm, a thin edge line only, everything stays floor, so the model has to
+             learn the edge geometry, not "an edge across the floor = stop".
+             Step up: a box (edge .. 30 m beyond, height dz) ray-traced with the stored depth as z-buffer:
+             objects closer than its surface keep occluding it; it covers the bottom dz of whatever stands
+             beyond (walls then start on the raised floor, as they would). Faces: the riser (vertical, with a
+             lit nosing) and the raised top.
+             Step down: rays that met visible floor beyond the edge continue to the lower plane (farther: the
+             floor slides up in the image); the riser faces away (invisible), the near edge shows as a lip, the
+             lower floor is darker along the riser (occlusion).
+             Floor appearance on the shifted plane = the original image at the same (gx, gz) on the original
+             plane, i.e. a plane-to-plane reprojection (Geom -> project -> remap); where that point is hidden or
+             off-image: the floor patch below (same texture, metric scale); with p_level_other another flooring.
+             Approximation: walls and objects standing beyond the edge are not moved: on a step up their base is
+             covered by the raised floor; on a step down a lower-floor point that projects onto a wall / object
+             standing beyond the edge takes that surface's colour (it is extruded down), labelled obstacle anyway.
   light      sun streaks: window light on the floor in metres (panes with mullion shadows, or blind slats),
              multiplicative gain + additive warm light so even dark tiles saturate; specular highlights: window
              reflections on glossy tiles, image-space elongated quads from the far floor toward the camera,
@@ -33,9 +53,9 @@ in the camera-yaw frame is (gx right, gz forward, height above the floor), all l
              parallelogram and a soft additive glare blob; these add the saturated, striped and reflection-shaped
              cases that failed on dark shiny tiles, and work without --tex.
 
-Labels: only pixels painted as a raised step change (-> obstacle). Floor paint goes only on floor pixels that
-are not 'under' (train.UNDER), so the under channel stays consistent (no strip, plinth or light under a bed);
-steps whose box would cover 'under' pixels are rejected. Deterministic given the random.Random passed in.
+Labels: only level changes (|dz| >= 2 cm) change labels (floor -> obstacle). 'under' pixels (train.UNDER) are
+never painted (no strip, plinth, step or light under a bed); beyond a non-drivable level edge they become obstacle
+(unreachable floor), unpainted. Deterministic given the random.Random passed in.
 
     sa = StructAug(StructAugCfg(), floor_seg.DEFAULT_CALIB)
     bgr, label, info = sa.apply(bgr, label, depth_mm, pitch_deg, roll_deg, cam_h_m, random.Random(seed))
@@ -61,17 +81,22 @@ class StructAugCfg:
     p_plinth_plain: float = 0.3          # plain skirting colour instead of the floor's own texture
     wall_min_h: float = 0.4              # m, a vertical surface rising this high (or out of the image) is a wall
     contact_h: float = 0.03              # m, a non-floor pixel this close to the floor touches it
-    # threshold / doorstep strip across the floor
+    # threshold / doorstep strip across the floor (labelled floor)
     p_threshold: float = 0.3
-    thr_dist: tuple = (0.5, 2.5)         # m ahead (gz) of a point of the strip
+    thr_dist: tuple = (0.5, 2.5)         # m ahead (gz) of a point of the strip / level edge
     thr_width: tuple = (0.03, 0.10)      # m, strip depth on the floor
-    thr_angle: float = 25.0              # deg, strip direction around "across the view"
-    p_door: float = 0.5                  # door-wide strip, else it spans the room
+    thr_angle: float = 25.0              # deg, strip / edge direction around "across the view"
+    p_door: float = 0.5                  # door-wide strip / level change, else it spans the room
     door_len: tuple = (0.7, 1.0)         # m
     flush_h: tuple = (0.0, 0.012)        # m, flush / low threshold: floor (robot drives over it)
-    p_step: float = 0.35                 # raised step instead: obstacle
-    step_h: tuple = (0.025, 0.06)        # m
     p_transition: float = 0.3            # room-spanning strip: other flooring beyond it
+    # level change: the floor beyond a straight edge is higher or lower (placement as the strips)
+    p_level: float = 0.3
+    p_level_up: float = 0.5              # step up, else step down
+    level_dz: tuple = (0.02, 0.18)       # m, |dz| of a step: riser and floor beyond are obstacle
+    p_level_flat: float = 0.2            # drivable level change instead: |dz| <= flat_dz, stays floor
+    flat_dz: float = 0.01                # m
+    p_level_other: float = 0.3           # other flooring beyond the edge
     # light on the floor (labels unchanged)
     p_sun: float = 0.25
     p_specular: float = 0.2
@@ -122,6 +147,12 @@ def _slab(d, lo, hi):
     tmin = np.where(par, -np.inf if inside else np.inf, np.minimum(t1, t2))
     tmax = np.where(par, np.inf if inside else -np.inf, np.maximum(t1, t2))
     return tmin, tmax
+
+
+def _mirror(t, n):
+    """Texture coordinate t (px) mirrored into 0 .. n-1: tiles a patch without seams."""
+    t = np.mod(t, 2 * n)
+    return np.where(t >= n, 2 * n - 1 - t, t).astype(np.float32)
 
 
 def floor_shade(img, free):
@@ -182,15 +213,17 @@ class StructAug:
             return bgr, label, info
         img, lab = bgr.astype(np.float32) / 255, label.copy()
         # decisions drawn up front: the probability of each augmentation does not depend on the others
-        do = [rng.random() < p for p in (c.p_plinth, c.p_threshold, c.p_sun, c.p_specular)]
+        do = [rng.random() < p for p in (c.p_plinth, c.p_threshold, c.p_level, c.p_sun, c.p_specular)]
         if do[0]:
             info["plinth"] = self.plinth(img, lab, geo, rng)
         if do[1]:
             info["threshold"] = self.threshold(img, lab, geo, free, rng)
-            free &= lab != 0                                  # a raised step is no longer floor
         if do[2]:
-            info["sun"] = self.sun(img, free, geo, rng)
+            info["level"] = self.level(img, lab, geo, free, rng)
+            free &= lab != 0                                  # floor beyond a step is no longer floor
         if do[3]:
+            info["sun"] = self.sun(img, free, geo, rng)
+        if do[4]:
             info["specular"] = self.specular(img, free, rng)
         if not any(info.values()):
             return bgr, label, info
@@ -280,11 +313,8 @@ class StructAug:
         s = np.broadcast_to(s_col[None, :], (H, W))
         if patch is not None:   # floor tiles laid on the wall, mirrored at the patch borders (no seams)
             ppm, n = 256.0, patch.shape[0]
-            def mirror(t):
-                t = np.mod(t, 2 * n)
-                return np.where(t >= n, 2 * n - 1 - t, t).astype(np.float32)
-            a = mirror(s * ppm)
-            b = mirror((hp - geo.hgt) * ppm + rng.uniform(0, n))
+            a = _mirror(s * ppm, n)
+            b = _mirror((hp - geo.hgt) * ppm + rng.uniform(0, n), n)
             col = cv2.remap(patch, a, b, cv2.INTER_LINEAR) * rng.uniform(0.6, 1.0)  # vertical face: less light
             edge_gain = rng.choice([0.55, 1.3])         # grout / cut tile edge, darker or lighter
         else:   # plain skirting: white, grey, wood, black, or the floor's own median colour
@@ -305,47 +335,160 @@ class StructAug:
         lab[band] = 0                                    # already obstacle (wall pixels): explicit
         return {"h": hp, "plain": patch is None, "px": int(band.sum())}
 
-    # ---------------------------------------------------------------- threshold strip
+    # ---------------------------------------------------------------- threshold strip / level change
+    def edge(self, geo, ys, xs, rng):
+        """A straight line on the floor through a random candidate pixel's floor point, within +-thr_angle of
+        square-on to the view. Returns (uc, ve, th, du, dv): along / across (forward-ish) coordinates of that
+        point, the angle, and the along / across coordinate of every pixel ray per unit optical depth."""
+        i = rng.randrange(len(ys))
+        cx, cz = geo.gx[ys[i], xs[i]], geo.gz[ys[i], xs[i]]
+        th = math.radians(rng.uniform(-self.cfg.thr_angle, self.cfg.thr_angle))
+        a, nrm = (math.cos(th), math.sin(th)), (-math.sin(th), math.cos(th))
+        return (a[0] * cx + a[1] * cz, nrm[0] * cx + nrm[1] * cz, th,
+                a[0] * geo.gx1 + a[1] * geo.gz1, nrm[0] * geo.gx1 + nrm[1] * geo.gz1)
+
+    @staticmethod
+    def box(geo, du, dv, uc, length, v0, v1, top):
+        """Ray / box intersection, box = along uc +- length/2, across v0 .. v1, height 0 .. top (slabs). Returns
+        (tin, face, hit): entry depth, face entered (0 top, 1 across faces = front / back, 2 ends: the slab
+        entered last) and hit = entered before the render's own surface (stored depth as z-buffer; tolerance:
+        a flush top is within mm of the floor depth)."""
+        ts = [_slab(geo.dh1, -geo.cam_h, top - geo.cam_h), _slab(dv, v0, v1),
+              _slab(du, uc - length / 2, uc + length / 2)]
+        tmin = np.stack([t[0] for t in ts])
+        tin, tout = tmin.max(0), np.min(np.stack([t[1] for t in ts]), 0)
+        hit = (tin <= tout) & (tin > 0) & geo.valid & (tin < geo.depth * 1.005 + 0.01)
+        return tin, tmin.argmax(0), hit
+
+    def reproject(self, img0, lab0, geo, gx, gz, extrude_v=None, nrm=None):
+        """Colours of floor points (gx, gz: 1-D, metres) as the ORIGINAL image shows them on the original floor
+        plane: plane-to-plane reprojection. Returns (colour N x 3, floor N, extruded N). floor: the point is
+        visible floor there (its pixel is floor and the pixel's 3D point is that point, not an occluder).
+        extruded (only with extrude_v, step down): the pixel shows a wall / object standing beyond the edge (its
+        across coordinate, along nrm, > extrude_v): the lower floor point is hidden by that surface's downward
+        extension, so it takes its colour."""
+        u, v = self.project(gx, gz, np.zeros_like(gx), geo)
+        inside = np.isfinite(u) & np.isfinite(v) & (u > -0.5) & (u < W - 0.5) & (v > -0.5) & (v < H - 0.5)
+        ui = np.clip(np.nan_to_num(np.round(u)), 0, W - 1).astype(int)
+        vi = np.clip(np.nan_to_num(np.round(v)), 0, H - 1).astype(int)
+        sx, sz = geo.gx[vi, ui], geo.gz[vi, ui]
+        same = np.hypot(sx - gx, sz - gz) < 0.03 + 0.03 * np.hypot(gx, gz)
+        floor = inside & geo.valid[vi, ui] & (lab0[vi, ui] != 0) & (lab0[vi, ui] != UNDER) & same
+        extruded = np.zeros_like(floor)
+        if extrude_v is not None:
+            extruded = inside & geo.valid[vi, ui] & (lab0[vi, ui] == 0) & (nrm[0] * sx + nrm[1] * sz > extrude_v)
+        # remap maps are 2-D and < 32767 per side: the N points as rows of 1024, padded
+        n, k = len(gx), 1024
+        pad = -n % k
+        mx = np.pad(np.nan_to_num(u, nan=-1).astype(np.float32), (0, pad)).reshape(-1, k)
+        my = np.pad(np.nan_to_num(v, nan=-1).astype(np.float32), (0, pad)).reshape(-1, k)
+        col = cv2.remap(img0, mx, my, cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE).reshape(-1, 3)[:n]
+        return col, floor, extruded
+
+    def level(self, img, lab, geo, free, rng):
+        c = self.cfg
+        cand = free & (geo.gz > c.thr_dist[0]) & (geo.gz < c.thr_dist[1])
+        ys, xs = np.nonzero(cand)
+        if len(ys) < 50:
+            return None
+        flat = rng.random() < c.p_level_flat
+        up = rng.random() < c.p_level_up
+        dz = rng.uniform(0.002, c.flat_dz) if flat else rng.uniform(*c.level_dz)
+        dz = dz if up else -dz
+        # Room-wide edges only: a door-wide one, with no door jambs beside it in the render, comes out as a
+        # platform / trench in the middle of the room (seen in the preview), a shape that does not exist. Where
+        # the render shows a doorway, a room-wide edge across it gives the real picture (walls stay walls).
+        door, length = False, 8.0
+        for _ in range(8):
+            uc, ve, th, du, dv = self.edge(geo, ys, xs, rng)
+            if up:      # the raised floor: a box from the edge to 30 m beyond, height dz
+                tin, face, region = self.box(geo, du, dv, uc, length, ve, ve + 30.0, dz)
+                t = np.where(region, tin, geo.tf)
+            else:       # rays meeting visible floor beyond the edge go down to the lower plane
+                region = free & (geo.tf * dv > ve) & (np.abs(geo.tf * du - uc) < length / 2)
+                with np.errstate(divide="ignore", invalid="ignore"):
+                    td = np.where(geo.dh1 < -1e-6, (dz - geo.cam_h) / geo.dh1, 50.0)
+                    ud = td * du
+                    # door-wide opening: rays leaving its width meet its side walls first
+                    ts = (uc + np.sign(ud - uc) * length / 2) / du
+                side = np.abs(ud - uc) > length / 2
+                t = np.where(side, ts, td)
+                face = np.where(side, 2, 0)
+            # drivable: floor stays floor, nothing else touched; 'under' floor is never painted
+            paint = region & free if flat else region & (lab != UNDER)
+            if (paint & free).sum() >= 300:              # enough visible change
+                break
+        else:
+            return None
+        nrm = (-math.sin(th), math.cos(th))
+        img0, lab0 = img.copy(), lab.copy()
+        u, v, h = t * du, t * dv, geo.cam_h + t * geo.dh1  # 3D point of each ray on the new surface
+        gx, gz = t * geo.gx1, t * geo.gz1
+        top = paint & (face == 0)                          # the floor beyond the edge, at its new height
+        vert = paint & (face != 0)                         # riser (up) / ends (up) / opening sides (down)
+        # floor beyond the edge: reprojection of the original floor, or another flooring
+        patch = self.floor_patch(img0, free, geo, rng)
+        col, okf, oke = self.reproject(img0, lab0, geo, gx[top], gz[top], None if up else ve, None if up else nrm)
+        other = rng.random() < c.p_level_other
+        use = oke | (okf & (not other))   # extruded walls / objects always; reprojected floor unless other flooring
+        if not use.all():   # other flooring / fallback, sampled at the metric (along, across) coordinates
+            if other:
+                tex, size = strip_texture(rng, ("tile", "tile", "wood", "stone"))
+                alt = self.sample(pyramid(tex), u, v, size, rng)[top] * rng.uniform(0.5, 1.1)
+            elif patch is not None:       # hidden or off-image: the floor's own texture, metric scale
+                n = patch.shape[0]
+                alt = cv2.remap(patch, _mirror(u * 256.0, n), _mirror(v * 256.0, n), cv2.INTER_LINEAR)[top]
+            else:
+                alt = np.broadcast_to(np.median(img0[free], axis=0), (int(top.sum()), 3))
+            col = np.where(use[:, None], col, alt)
+        col = col * rng.uniform(0.85, 1.1)                 # the other room is lit a bit differently
+        if not up:   # lower floor darker along the riser it lies against (ambient occlusion)
+            col = col * (0.55 + 0.45 * np.clip((v[top] - ve) / 0.08, 0, 1))[:, None]
+        img[top] = col
+        # vertical faces: the floor's own material (tiled step) or a plain colour, less lit than the floor
+        if patch is not None and rng.random() < 0.6:
+            n = patch.shape[0]
+            vcol = cv2.remap(patch, _mirror(np.where(face == 2, v, u) * 256.0, n), _mirror(h * 256.0, n),
+                             cv2.INTER_LINEAR)
+        else:
+            colour = rng.choice([(0.85, 0.87, 0.88), (0.6, 0.6, 0.6), (0.2, 0.35, 0.5), (0.1, 0.1, 0.1), None])
+            colour = np.median(img0[free], axis=0) if colour is None else np.array(colour, np.float32)
+            vcol = np.broadcast_to(colour.astype(np.float32), (H, W, 3)).copy()
+        vcol *= rng.uniform(0.45, 0.8)
+        vcol[face == 2] *= 0.6
+        if up:       # lit nosing along the riser's top edge
+            vcol[(face == 1) & (h > dz - min(0.01, 0.25 * dz))] *= 1.35
+        img[vert] = vcol[vert]
+        # the edge on our side: a lip (step down, flush) or the riser's bottom joint (step up), floor label
+        uf, vf = geo.tf * du, geo.tf * dv
+        lip = rng.uniform(0.01, 0.025) if not up else 0.006
+        near = free & ~paint & (vf > ve - lip) & (vf <= ve) & (np.abs(uf - uc) < length / 2)
+        img[near] *= 0.6 if up else rng.choice([0.6, 1.35])
+        if not flat:
+            lab[paint] = 0               # riser + floor at another level: not drivable (obstacle / cliff)
+            # 'under' floor beyond the edge (under a bed in the other room): left unpainted (approximation: it
+            # stays at the old height in the image) but it is unreachable now: obstacle, not floor / under
+            lab[(lab == UNDER) & (vf > ve) & (np.abs(uf - uc) < length / 2)] = 0
+        return {"up": up, "dz": dz, "flat": flat, "door": door, "th": th, "uc": uc, "ve": ve, "len": length,
+                "other": other, "px": int(paint.sum())}
+
     def threshold(self, img, lab, geo, free, rng):
         c = self.cfg
         cand = free & (geo.gz > c.thr_dist[0]) & (geo.gz < c.thr_dist[1])
         ys, xs = np.nonzero(cand)
         if len(ys) < 50:
             return None
-        raised = rng.random() < c.p_step
-        top = max(rng.uniform(*(c.step_h if raised else c.flush_h)), 1e-3)
+        top = max(rng.uniform(*c.flush_h), 1e-3)
         width = rng.uniform(*c.thr_width)
         door = rng.random() < c.p_door
         length = rng.uniform(*c.door_len) if door else 8.0
         for _ in range(6):
-            i = rng.randrange(len(ys))
-            cx, cz = geo.gx[ys[i], xs[i]], geo.gz[ys[i], xs[i]]
-            th = math.radians(rng.uniform(-c.thr_angle, c.thr_angle))
-            a, nrm = (math.cos(th), math.sin(th)), (-math.sin(th), math.cos(th))   # along, across (forward-ish)
-            uc = a[0] * cx + a[1] * cz
-            v0 = nrm[0] * cx + nrm[1] * cz - width / 2
-            v1 = v0 + width
-            du = a[0] * geo.gx1 + a[1] * geo.gz1          # along / across coordinate per unit ray depth
-            dv = nrm[0] * geo.gx1 + nrm[1] * geo.gz1
-            # ray / box intersection (slabs: height, across, along); the box is entered on the face whose
-            # slab is entered last
-            ts = [_slab(geo.dh1, -geo.cam_h, top - geo.cam_h), _slab(dv, v0, v1),
-                  _slab(du, uc - length / 2, uc + length / 2)]
-            tmin = np.stack([t[0] for t in ts])
-            tin, tout = tmin.max(0), np.min(np.stack([t[1] for t in ts]), 0)
-            face = tmin.argmax(0)                         # 0 top, 1 front / back, 2 ends
-            # z-buffer against the render (tolerance: the flush top is within mm of the floor depth)
-            hit = (tin <= tout) & (tin > 0) & geo.valid & (tin < geo.depth * 1.005 + 0.01)
-            if (hit & free).sum() < 40:
-                continue
-            if raised:
-                # no step over 'under' floor, and mostly on visible floor (not inside a sofa)
-                if (hit & (lab == UNDER)).any() or (hit & free).sum() < 0.6 * hit.sum():
-                    continue
-                paint = hit
-            else:
-                paint = hit & free
-            break
+            uc, ve, th, du, dv = self.edge(geo, ys, xs, rng)
+            v0, v1 = ve - width / 2, ve + width / 2
+            tin, face, hit = self.box(geo, du, dv, uc, length, v0, v1, top)
+            paint = hit & free                            # only on plain floor: the label stays floor
+            if paint.sum() >= 40:
+                break
         else:
             return None
         t = np.where(hit, tin, geo.tf)                    # off the box: the ray's floor point (smooth mip levels)
@@ -361,11 +504,9 @@ class StructAug:
         col[(face == 0) & ((np.abs(v - v0) < j) | (np.abs(v - v1) < j))] *= 0.5   # joints with the floor
         shade = floor_shade(img, free)
         img[paint] = (col * shade)[paint]
-        info = {"raised": raised, "h": top, "width": width, "door": door, "th": th, "uc": uc, "v0": v0,
-                "v1": v1, "len": length, "px": int(paint.sum())}
-        if raised:
-            lab[paint] = 0                                # > 2 cm: an obstacle, front face and top
-        elif not door and rng.random() < c.p_transition:  # other flooring beyond a room-spanning strip
+        info = {"h": top, "width": width, "door": door, "th": th, "uc": uc, "v0": v0, "v1": v1, "len": length,
+                "px": int(paint.sum())}
+        if not door and rng.random() < c.p_transition:  # other flooring beyond a room-spanning strip
             beyond = free & ~paint & (geo.tf * dv > v1)
             if beyond.any():
                 tex2, size2 = strip_texture(rng, ("tile", "tile", "wood", "stone"))   # floorings

@@ -66,10 +66,10 @@ python -m floor_seg.train --data data/synth/thor_v1 data/synth/thor_v3 --kinds f
 ## Training command (v8, not trained yet): v7 + structure augmentations
 
 Same recipe plus `--aug-structures` ([floor_seg/aug_structures.py](floor_seg/aug_structures.py)): tiled plinths on
-wall bases (obstacle), threshold strips (flush: floor; raised step >= 2.5 cm: obstacle) and sun streaks /
-specular highlights (floor), for three real failures: tiled plinths called floor, doorsteps called obstacle,
-sunlit shiny tiles called obstacle. Default probabilities (plinth 0.3, threshold 0.3 of which 35 % raised,
-sun 0.25, specular 0.2). Preview: `python -m floor_seg.aug_preview --data data/synth/thor_v3 --n 6 --out p.jpg`.
+wall bases (obstacle), flush threshold strips (floor), level changes (the floor beyond an edge 2-18 cm higher or
+lower: riser and floor beyond obstacle; 20 % of them within 1 cm: floor) and sun streaks / specular highlights
+(floor), for real failures: tiled plinths called floor, doorsteps called obstacle, sunlit shiny tiles called
+obstacle. Default probabilities (plinth 0.3, threshold 0.3, level 0.3, sun 0.25, specular 0.2). Preview: `python -m floor_seg.aug_preview --data data/synth/thor_v3 --n 6 --out p.jpg`.
 
 ```bash
 python -m floor_seg.train --data data/synth/thor_v1 data/synth/thor_v3 --kinds floor \

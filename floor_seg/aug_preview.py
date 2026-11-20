@@ -3,7 +3,8 @@
     python -m floor_seg.aug_preview --data data/synth/thor_v3 data/synth/thor_v2 --n 6 --out aug_preview.jpg
 
 One row per render (floor views whose files exist locally), columns: original, plinth, flush threshold,
-raised step, sun streak + specular highlight, all (training defaults). Each cell: the image above its label
+level up, level down, level +-1 cm (drivable), sun streak + specular highlight, all (training defaults).
+Each cell: the image above its label
 (green floor, red obstacle, blue 'under' when the render has _under.png). "n/a": nothing could be placed
 (e.g. no wall base in view). --tex also runs the floor retexturing first, as in training.
 """
@@ -19,10 +20,12 @@ import numpy as np
 from floor_seg import DEFAULT_CALIB
 from floor_seg.aug_structures import UNDER, StructAug, StructAugCfg
 
-OFF = dict(p_plinth=0.0, p_threshold=0.0, p_sun=0.0, p_specular=0.0)
+OFF = dict(p_plinth=0.0, p_threshold=0.0, p_level=0.0, p_sun=0.0, p_specular=0.0)
 COLUMNS = [("original", OFF), ("plinth", dict(OFF, p_plinth=1.0)),
-           ("flush threshold", dict(OFF, p_threshold=1.0, p_step=0.0)),
-           ("raised step", dict(OFF, p_threshold=1.0, p_step=1.0)),
+           ("flush threshold", dict(OFF, p_threshold=1.0)),
+           ("level up", dict(OFF, p_level=1.0, p_level_up=1.0, p_level_flat=0.0)),
+           ("level down", dict(OFF, p_level=1.0, p_level_up=0.0, p_level_flat=0.0)),
+           ("level +-1 cm", dict(OFF, p_level=1.0, p_level_flat=1.0)),
            ("sun + specular", dict(OFF, p_sun=1.0, p_specular=1.0)), ("all (defaults)", {})]
 
 
@@ -81,6 +84,9 @@ def main():
                 text += f" {painted['plinth']['h'] * 100:.0f} cm" + (" plain" if painted["plinth"]["plain"] else "")
             if "threshold" in painted:
                 text += f" {painted['threshold']['h'] * 100:.1f} cm"
+            if "level" in painted:
+                lv = painted["level"]
+                text += f" {lv['dz'] * 100:+.1f} cm" + (" door" if lv["door"] else "") + (" other" if lv["other"] else "")
             cv2.putText(cell, text, (8, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 0), 3)
             cv2.putText(cell, text, (8, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 1)
             cells.append(cv2.resize(cell, (cell.shape[1] // 2, cell.shape[0] // 2), interpolation=cv2.INTER_AREA))

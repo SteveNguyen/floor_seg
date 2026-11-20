@@ -12,7 +12,7 @@ from floor_seg.aug_structures import UNDER, Geom, StructAug, StructAugCfg
 from floor_seg.floor_tex import H, W, floor_coords, heights
 
 CAM_H, PITCH, ROLL, WALL_Z = 0.27, 18.0, 1.5, 2.0
-OFF = StructAugCfg(p_plinth=0.0, p_threshold=0.0, p_sun=0.0, p_specular=0.0)
+OFF = StructAugCfg(p_plinth=0.0, p_threshold=0.0, p_level=0.0, p_sun=0.0, p_specular=0.0)
 
 
 @pytest.fixture(scope="module")
@@ -76,38 +76,108 @@ def test_plinth_is_on_the_wall_base_with_its_metric_height(sa, scene, plain):
 
 def test_flush_threshold_stays_floor(sa, scene):
     bgr, label, _ = scene
-    img, lab, info = run(sa, scene, seed=1, p_threshold=1.0, p_step=0.0, p_transition=0.0)
+    img, lab, info = run(sa, scene, seed=1, p_threshold=1.0, p_transition=0.0)
     t = info["threshold"]
-    assert t and not t["raised"] and t["h"] <= 0.012
+    assert t and t["h"] <= 0.012
     painted = (img != bgr).any(axis=2)
     assert painted.sum() > 40
     assert np.array_equal(lab, label)                     # drivable: labels unchanged
     assert (label[painted] == 1).all()                    # painted on plain floor only (not under, not wall)
 
 
-def test_raised_step_is_obstacle_with_its_front_face(sa, scene):
+LEVEL = dict(p_level=1.0, p_level_flat=0.0, p_level_other=0.0, thr_dist=(0.7, 0.9))
+
+
+def across(g, lv):
+    """Per unit ray depth: across-edge coordinate (forward-ish) of every pixel ray, for the edge in info."""
+    return -math.sin(lv["th"]) * g.gx1 + math.cos(lv["th"]) * g.gz1
+
+
+def checker_match(img, g, t, sel):
+    """Share of pixels sel whose brightness shows the scene's checker parity at the ray's point at depth t
+    (bright 150, dark 90, scaled by the 0.85-1.1 'other room' light: threshold 113), cell interiors only."""
+    gx, gz = t * g.gx1, t * g.gz1
+    interior = (np.abs(np.mod(gx, 0.3) - 0.15) < 0.12) & (np.abs(np.mod(gz, 0.3) - 0.15) < 0.12)
+    sel = sel & interior & (gz < 1.9) & ~((gx < -0.55) & (gz < 1.25))   # visible on the original floor, not under
+    parity = ((np.floor(gx / 0.3) + np.floor(gz / 0.3)) % 2)[sel] > 0
+    assert sel.sum() > 100
+    return np.mean((img[..., 0][sel] > 113) == parity)
+
+
+def test_step_up_riser_and_raised_floor_in_metres(sa, scene):
     bgr, label, _ = scene
-    for seed in range(20):                                # a placement off the 'under' patch
-        img, lab, info = run(sa, scene, seed=seed, p_threshold=1.0, p_step=1.0)
-        if info.get("threshold"):
-            break
-    t = info["threshold"]
-    assert t["raised"] and t["h"] >= 0.025
+    img, lab, info = run(sa, scene, seed=0, p_level_up=1.0, **LEVEL)
+    lv = info["level"]
+    dz, ve = lv["dz"], lv["ve"]
+    assert lv["up"] and 0.02 <= dz <= 0.18 and not lv["flat"]
     g = geom(sa, scene)
-    new_obst = (label != 0) & (lab == 0)
-    assert new_obst.any() and ((lab != label) <= new_obst).all()      # only floor -> obstacle changes
-    assert (img != bgr).any(axis=2)[new_obst].all()                   # every relabelled pixel is painted
-    # floor points under the box footprint are covered; covered floor lies behind its front edge (v >= v0)
-    a, n = (math.cos(t["th"]), math.sin(t["th"])), (-math.sin(t["th"]), math.cos(t["th"]))
-    u = a[0] * g.gx + a[1] * g.gz
-    v = n[0] * g.gx + n[1] * g.gz
-    foot = (label == 1) & (np.abs(u - t["uc"]) < t["len"] / 2 - 0.02) & (v > t["v0"] + 0.005) & (v < t["v1"] - 0.005)
-    assert foot.any() and (lab[foot] == 0).all()
-    assert (v[new_obst & (label == 1)] > t["v0"] - 0.01).all()
-    # the front face and top hide floor beyond the footprint: more pixels than the footprint alone
-    inside = (label == 1) & (np.abs(u - t["uc"]) < t["len"] / 2) & (v >= t["v0"]) & (v <= t["v1"])
-    assert new_obst.sum() > inside.sum()
-    assert (lab[label == UNDER] == UNDER).all()
+    dv = across(g, lv)
+    painted = (img != bgr).any(axis=2)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        te = ve / dv                                       # ray depth where it crosses the edge's vertical plane
+    he = CAM_H + te * g.dh1                                # ... at this height
+    # riser: rays crossing the edge plane between 0 and dz (and before the wall) are painted, obstacle
+    riser = (dv > 0) & (he > 0.003) & (he < dz - 0.003) & (te < g.depth) & (label == 1)
+    assert riser.sum() > 50 and painted[riser].all() and (lab[riser] == 0).all()
+    # floor before the edge (beyond the riser's 6 mm bottom joint): untouched; floor beyond: obstacle
+    vf = g.tf * dv
+    before = (label == 1) & (vf < ve - 0.007)
+    assert np.array_equal(img[before], bgr[before]) and (lab[before] == 1).all()
+    assert (lab[(label != 0) & (vf > ve + 0.005)] == 0).all()
+    # the raised top shows the floor texture of the point beneath it, at height dz: reprojection is metric
+    top = (he > dz + 0.005) & (dv > 0) & (label == 1) & (vf > ve)
+    tt = (dz - CAM_H) / np.where(g.dh1 < -1e-6, g.dh1, -1e-6)
+    assert checker_match(img, g, tt, top) > 0.95
+
+
+def test_step_down_lower_floor_slides_up(sa, scene):
+    bgr, label, _ = scene
+    img, lab, info = run(sa, scene, seed=0, p_level_up=0.0, **LEVEL)
+    lv = info["level"]
+    dz, ve = lv["dz"], lv["ve"]
+    assert not lv["up"] and -0.18 <= dz <= -0.02
+    g = geom(sa, scene)
+    dv = across(g, lv)
+    vf = g.tf * dv
+    beyond = (label == 1) & (vf > ve)
+    assert (lab[beyond] == 0).all()                        # cliff: not drivable
+    before = (label == 1) & (vf < ve - 0.026)              # beyond the lip (<= 2.5 cm): untouched
+    assert np.array_equal(img[before], bgr[before]) and (lab[before] == 1).all()
+    # rays meeting the floor beyond the edge now show the lower floor at dz, farther along the same ray
+    td = (dz - CAM_H) / np.where(g.dh1 < -1e-6, g.dh1, -1e-6)
+    far = beyond & (td * dv > ve + 0.09)                   # past the darker band along the riser
+    assert checker_match(img, g, td, far) > 0.95
+    assert checker_match(bgr, g, g.tf, far) > 0.95 and checker_match(img, g, g.tf, far) < 0.8  # really moved
+
+
+def test_drivable_level_change_stays_floor(sa, scene):
+    bgr, label, _ = scene
+    for up in (0.0, 1.0):
+        img, lab, info = run(sa, scene, seed=3, **dict(LEVEL, p_level_flat=1.0, p_level_up=up))
+        lv = info["level"]
+        assert lv["flat"] and abs(lv["dz"]) <= 0.01
+        painted = (img != bgr).any(axis=2)
+        assert painted.sum() > 300 and np.array_equal(lab, label)
+        assert (label[painted] == 1).all()
+
+
+@pytest.fixture(scope="module")
+def scene_occ(scene):
+    """scene + a flat object 0.5 m in front of the camera over columns 260-380, hiding the floor behind it."""
+    bgr, label, depth = (a.copy() for a in scene)
+    bb = np.zeros(label.shape, bool)
+    bb[:, 260:380] = depth[:, 260:380] > 500
+    bgr[bb], label[bb], depth[bb] = 30, 0, 500
+    return bgr, label, depth, bb
+
+
+def test_level_change_respects_closer_objects(sa, scene_occ):
+    bgr, label, depth, bb = scene_occ
+    for up in (0.0, 1.0):
+        for seed in range(4):
+            img, lab, info = run(sa, (bgr, label, depth), seed=seed, **dict(LEVEL, p_level_up=up))
+            assert info["level"]
+            assert np.array_equal(img[bb], bgr[bb]) and np.array_equal(lab[bb], label[bb])
 
 
 def test_light_keeps_labels_and_spares_under_and_walls(sa, scene):
@@ -119,17 +189,21 @@ def test_light_keeps_labels_and_spares_under_and_walls(sa, scene):
     assert (label[painted] == 1).all()
 
 
-def test_under_pixels_never_painted_or_relabelled(sa, scene):
+def test_under_pixels_never_painted(sa, scene):
     bgr, label, _ = scene
     under = label == UNDER
     for seed in range(15):
-        img, lab, _ = run(sa, scene, seed=seed, p_plinth=1.0, p_threshold=1.0, p_sun=1.0, p_specular=1.0)
-        assert (lab[under] == UNDER).all() and (img[under] == bgr[under]).all()
-        assert ((lab != label) <= ((label != 0) & (lab == 0))).all()  # only floor -> obstacle (raised steps)
+        img, lab, info = run(sa, scene, seed=seed, p_plinth=1.0, p_threshold=1.0, p_level=1.0, p_sun=1.0,
+                             p_specular=1.0)
+        assert (img[under] == bgr[under]).all()
+        assert ((lab != label) <= ((label != 0) & (lab == 0))).all()  # only floor -> obstacle (level changes)
+        lv = info.get("level")
+        if not lv or lv["flat"]:          # 'under' only becomes obstacle beyond a non-drivable level edge
+            assert (lab[under] == UNDER).all()
 
 
 def test_deterministic_given_the_seed(sa, scene):
-    full = dict(p_plinth=1.0, p_threshold=1.0, p_sun=1.0, p_specular=1.0)
+    full = dict(p_plinth=1.0, p_threshold=1.0, p_level=1.0, p_sun=1.0, p_specular=1.0)
     a, b, c = (run(sa, scene, seed=s, **full) for s in (5, 5, 6))
     assert np.array_equal(a[0], b[0]) and np.array_equal(a[1], b[1])
     assert not np.array_equal(a[0], c[0])
@@ -143,8 +217,8 @@ def test_off_by_default(renders):
     assert struct_aug(args) is None
     tr, _ = datasets([str(renders)], ftex=None, saug=struct_aug(args))
     assert all(d.saug is None for d in tr.datasets)
-    on = build_parser().parse_args(["--data", "d", "--out", "x", "--aug-structures", "--aug-p-step", "0.5"])
-    assert struct_aug(on).cfg.p_step == 0.5 and struct_aug(on).cfg.p_plinth == StructAugCfg().p_plinth
+    on = build_parser().parse_args(["--data", "d", "--out", "x", "--aug-structures", "--aug-p-level", "0.5"])
+    assert struct_aug(on).cfg.p_level == 0.5 and struct_aug(on).cfg.p_plinth == StructAugCfg().p_plinth
 
 
 def test_zero_probabilities_are_identity(sa, scene):
@@ -157,7 +231,7 @@ def test_hook_in_training_dataset(renders):
     # with the augmentation on, training items still come out (fake renders: lower half floor, plane depth)
     from floor_seg.train import datasets
 
-    full = StructAugCfg(p_plinth=1.0, p_threshold=1.0, p_sun=1.0, p_specular=1.0)
+    full = StructAugCfg(p_plinth=1.0, p_threshold=1.0, p_level=1.0, p_sun=1.0, p_specular=1.0)
     tr, va = datasets([str(renders)], saug=StructAug(full))
     x, y = tr[0]
     assert x.shape == (3, 192, 320) and y.shape == (192, 320)
