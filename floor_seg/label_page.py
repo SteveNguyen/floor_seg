@@ -12,6 +12,9 @@ Mouse: click a region to cycle floor -> obstacle -> ignore.
 Keys: 1 / 2 / 3 set the region under the cursor to floor / obstacle / ignore; A sets every region floor,
 Shift+A every region obstacle; Z undo; R raw image on/off; D driven hint on/off; V toggle "reviewed";
 Enter mark reviewed, save and go to the next frame; Right / Space next, Left / Shift+Space previous; S save.
+Hand polygon (a patch SAM2 merged into a bigger region): P, click the corners (also on the raw image), then 1 / 2 / 3
+closes it as floor / obstacle / ignore; Backspace removes the last corner, Esc cancels; X deletes the polygon under
+the cursor. Polygons are saved in the frame's "poly" list and applied last by `label_real apply`.
 
 Label rule (project decision): anything > 1 cm above the floor is an obstacle; rugs, cables, door thresholds and
 doorsteps the robot can drive over are floor.
@@ -79,6 +82,20 @@ def edit_entry(init, labels, old):
     return e
 
 
+def check_polys(name, polys):
+    """Hand polygons as label_real apply reads them: [{"label": floor|obstacle|ignore, "pts": [[x, y], ...]}],
+    at least 3 points, pixel coords rounded to int. Raises ValueError otherwise."""
+    out = []
+    for p in polys:
+        pts = p.get("pts") if isinstance(p, dict) else None
+        if not isinstance(pts, list) or p.get("label") not in LABELS or len(pts) < 3 or \
+                not all(isinstance(q, list) and len(q) == 2 and all(isinstance(c, (int, float)) for c in q)
+                        for q in pts):
+            raise ValueError(f"{name}: bad polygon {p!r}")
+        out.append({"label": p["label"], "pts": [[round(x), round(y)] for x, y in pts]})
+    return out
+
+
 def save(data_dir, frames):
     """Merge {name: {"labels": {id: label}, "reviewed": bool}} into edits.json and reviewed.json.
     Raises ValueError (nothing written) on an unknown frame, a missing / unknown region id or label."""
@@ -94,6 +111,10 @@ def save(data_dir, frames):
         if set(labels) != set(init) or not set(labels.values()) <= set(LABELS):
             raise ValueError(f"{name}: labels must give floor/obstacle/ignore for every region")
         e = edit_entry(init, labels, edits.get(name, {}))
+        if "poly" in f:   # the page sends the frame's full polygon list (drawn or deleted there); absent: kept
+            e.pop("poly", None)
+            if f["poly"]:
+                e["poly"] = check_polys(name, f["poly"])
         if e:
             edits[name] = e
         else:
@@ -142,6 +163,7 @@ header { position: sticky; top: 0; background: #fff; color: #222; padding: 8px 1
   z-index: 1; }
 header button, header select { font-size: 0.95em; padding: 4px 10px; }
 #rev.on { background: #43a047; color: #fff; }
+#pbtn.on { background: #d500f9; color: #fff; }
 #dirty { color: #e53935; font-weight: bold; }
 #stage { position: relative; margin: 8px auto; }
 #stage img, #stage canvas { position: absolute; inset: 0; width: 100%; height: 100%; }
@@ -152,10 +174,13 @@ header button, header select { font-size: 0.95em; padding: 4px 10px; }
   <b>__TITLE__</b> &mdash; <select id="sel"></select> <span id="pos"></span> &middot;
   reviewed <b id="prog"></b> &middot; region <span id="hov">-</span>
   <button id="rev">reviewed (V)</button> <button id="raw">raw (R)</button> <button id="hint">driven (D)</button>
+  <button id="pbtn">polygon (P)</button>
   <button id="save">save (S)</button> <button id="apply">apply reviewed</button> <span id="dirty"></span>
   <div><small>Click: floor &rarr; obstacle &rarr; ignore. 1/2/3: region under cursor floor/obstacle/ignore.
   A: all floor, Shift+A: all obstacle. Z: undo. Enter: reviewed + save + next. &rarr;/Space next, &larr;/Shift+Space
-  previous. <span style="color:#2e7d32">floor</span>, <span style="color:#c62828">obstacle</span>, grey ignore,
+  previous. <b>Polygon</b> (for a patch merged into a bigger region): P, click the corners, then 1/2/3 closes it as
+  floor/obstacle/ignore (applied on top of the regions); Backspace last corner, Esc cancel; X deletes the polygon
+  under the cursor. <span style="color:#2e7d32">floor</span>, <span style="color:#c62828">obstacle</span>, grey ignore,
   <span style="color:#1e88e5">blue: driven over</span>. Rule: &gt; 1 cm above the floor = obstacle; rugs, cables,
   thresholds, drivable doorsteps = floor.</small></div>
 </header>
@@ -169,6 +194,7 @@ const ctx = cv.getContext("2d");
 let FRAMES = [];          // [{name, reviewed}] from the server
 const cache = new Map();  // name -> loaded frame state (kept while browsing so unsaved changes survive)
 let cur = null, idx = 0, hover = 0, showRaw = false, showHint = true;
+let drawPts = null, mouse = null;  // polygon being drawn (image px corners, null = not drawing); cursor in image px
 
 async function getJSON(url, opts) {
   const r = await fetch(url, opts);
@@ -208,10 +234,9 @@ async function load(name) {
 
 function draw() {
   if (!cur) return;
-  cv.style.display = showRaw ? "none" : "";
   const {w, h, reg, lab, edge, drv} = cur;
-  const im = ctx.createImageData(w, h), d = im.data;
-  for (let i = 0; i < w * h; i++) {
+  const im = ctx.createImageData(w, h), d = im.data;  // all transparent: what raw mode shows over the photo
+  for (let i = 0; i < w * h && !showRaw; i++) {
     const r = reg[i], c = COLORS[lab[r]], o = 4 * i;
     if (showHint && drv[i]) { d[o] = 30; d[o + 1] = 136; d[o + 2] = 229; d[o + 3] = 255; continue; }
     if (edge[i]) { d[o] = 255; d[o + 1] = 255; d[o + 2] = r && r === hover ? 255 : 0; d[o + 3] = 255; continue; }
@@ -219,15 +244,30 @@ function draw() {
     d[o + 3] = r && r === hover ? 150 : 95;  // the hovered region a bit stronger (target of 1/2/3)
   }
   ctx.putImageData(im, 0, 0);
-  for (const p of cur.poly) {  // hand polygons from edits.json: kept and applied last by label_real, not editable
-    ctx.strokeStyle = "rgb(" + COLORS[NAMES.indexOf(p.label)] + ")";
+  for (const p of showRaw ? [] : cur.poly) {  // hand polygons: applied last by label_real, filled with their label
+    const c = COLORS[NAMES.indexOf(p.label)];
+    ctx.fillStyle = "rgba(" + c + ",0.55)";
+    ctx.strokeStyle = "rgb(" + c + ")";
     ctx.setLineDash([6, 4]);
     ctx.lineWidth = 2;
     ctx.beginPath();
     p.pts.forEach(([x, y], k) => k ? ctx.lineTo(x, y) : ctx.moveTo(x, y));
     ctx.closePath();
+    ctx.fill();
     ctx.stroke();
   }
+  if (drawPts) {  // polygon being drawn: corners so far, then a line to the cursor
+    ctx.strokeStyle = "rgb(255,0,255)";
+    ctx.setLineDash([]);
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    drawPts.forEach(([x, y], k) => k ? ctx.lineTo(x, y) : ctx.moveTo(x, y));
+    if (mouse && drawPts.length) ctx.lineTo(mouse[0], mouse[1]);
+    ctx.stroke();
+    ctx.fillStyle = "rgb(255,0,255)";
+    for (const [x, y] of drawPts) ctx.fillRect(x - 2, y - 2, 4, 4);
+  }
+  document.getElementById("pbtn").classList.toggle("on", !!drawPts);
   status();
 }
 
@@ -259,13 +299,13 @@ async function go(i) {
   } catch (e) { document.getElementById("msg").textContent = "Error: " + e.message; return; }
   cv.width = cur.w; cv.height = cur.h;
   img.src = "/img/" + cur.name + ".jpg";
-  hover = 0;
+  hover = 0; drawPts = null;
   fit();
   draw();
 }
 
 function change(fn) {  // every edit goes through here: undo snapshot, dirty flag, redraw
-  cur.undo.push({lab: cur.lab.slice(), reviewed: cur.reviewed});
+  cur.undo.push({lab: cur.lab.slice(), reviewed: cur.reviewed, poly: cur.poly.slice()});
   fn();
   cur.dirty = true;
   FRAMES[idx].reviewed = cur.reviewed;
@@ -276,7 +316,7 @@ function setAll(code) { change(() => { for (const r of cur.ids) cur.lab[r] = cod
 function undo() {
   const u = cur.undo.pop();
   if (!u) return;
-  cur.lab = u.lab; cur.reviewed = u.reviewed; cur.dirty = true;
+  cur.lab = u.lab; cur.reviewed = u.reviewed; cur.poly = u.poly; cur.dirty = true;
   FRAMES[idx].reviewed = cur.reviewed;
   draw();
 }
@@ -286,7 +326,7 @@ async function save() {
   for (const f of cache.values()) if (f.dirty) {
     const labels = {};
     for (const r of f.ids) labels[r] = NAMES[f.lab[r]];
-    frames[f.name] = {labels, reviewed: f.reviewed};
+    frames[f.name] = {labels, reviewed: f.reviewed, poly: f.poly};
   }
   if (!Object.keys(frames).length) return true;
   try {
@@ -311,14 +351,44 @@ async function applyReviewed() {
   } catch (e) { document.getElementById("msg").textContent = "Apply error: " + e.message; }
 }
 
-function regionAt(ev) {
+function pixAt(ev) {  // mouse position in image pixels
   const b = cv.getBoundingClientRect();
-  const x = Math.floor((ev.clientX - b.left) * cur.w / b.width), y = Math.floor((ev.clientY - b.top) * cur.h / b.height);
+  return [Math.floor((ev.clientX - b.left) * cur.w / b.width), Math.floor((ev.clientY - b.top) * cur.h / b.height)];
+}
+function regionAt(ev) {
+  const [x, y] = pixAt(ev);
   return x >= 0 && y >= 0 && x < cur.w && y < cur.h ? cur.reg[y * cur.w + x] : 0;
 }
-cv.addEventListener("mousemove", ev => { const r = regionAt(ev); if (r !== hover) { hover = r; draw(); } });
-cv.addEventListener("mouseleave", () => { hover = 0; draw(); });
-cv.addEventListener("click", ev => { const r = regionAt(ev); if (r) setRegion(r, (cur.lab[r] + 1) % 3); });
+function inPoly([x, y], pts) {  // even-odd ray casting
+  let inside = false;
+  for (let i = 0, j = pts.length - 1; i < pts.length; j = i++) {
+    const [xi, yi] = pts[i], [xj, yj] = pts[j];
+    if ((yi > y) !== (yj > y) && x < (xj - xi) * (y - yi) / (yj - yi) + xi) inside = !inside;
+  }
+  return inside;
+}
+function closePoly(code) {  // the drawn polygon becomes a hand polygon with this label
+  if (drawPts.length < 3) return;
+  const pts = drawPts;
+  drawPts = null;
+  change(() => { cur.poly = [...cur.poly, {label: NAMES[code], pts}]; });
+}
+function deletePolyAt(p) {  // the last-drawn polygon under the cursor (it is the one on top)
+  for (let k = cur.poly.length - 1; k >= 0; k--)
+    if (inPoly(p, cur.poly[k].pts)) { change(() => { cur.poly = cur.poly.filter((_, i) => i !== k); }); return; }
+}
+cv.addEventListener("mousemove", ev => {
+  const r = regionAt(ev);
+  mouse = pixAt(ev);
+  if (r !== hover || drawPts) { hover = r; draw(); }
+});
+cv.addEventListener("mouseleave", () => { hover = 0; mouse = null; draw(); });
+cv.addEventListener("click", ev => {
+  if (drawPts) { drawPts.push(pixAt(ev)); draw(); return; }  // drawing: a click adds a corner
+  const r = regionAt(ev);
+  if (r && !showRaw) setRegion(r, (cur.lab[r] + 1) % 3);  // raw image: no relabelling by accident
+});
+document.getElementById("pbtn").onclick = () => { drawPts = drawPts ? null : []; draw(); };
 document.getElementById("sel").onchange = e => go(e.target.selectedIndex);
 document.getElementById("rev").onclick = () => change(() => { cur.reviewed = !cur.reviewed; });
 document.getElementById("raw").onclick = () => { showRaw = !showRaw; draw(); };
@@ -330,9 +400,19 @@ window.addEventListener("beforeunload", e => { if ([...cache.values()].some(f =>
 document.addEventListener("keydown", async e => {
   if (!cur || e.target.tagName === "SELECT" || e.ctrlKey || e.metaKey || e.altKey) return;
   const k = e.key;
-  if (k === "ArrowRight" || (k === " " && !e.shiftKey)) go(idx + 1);
+  if (drawPts) {  // drawing a polygon: only these keys; 1/2/3 close it
+    if (k === "1" || k === "2" || k === "3") closePoly(Number(k) - 1);
+    else if (k === "Backspace") { drawPts.pop(); draw(); }
+    else if (k === "Escape" || k === "p" || k === "P") { drawPts = null; draw(); }
+    else return;
+    e.preventDefault();
+    return;
+  }
+  if (k === "p" || k === "P") { drawPts = []; draw(); }
+  else if ((k === "x" || k === "X") && mouse) deletePolyAt(mouse);
+  else if (k === "ArrowRight" || (k === " " && !e.shiftKey)) go(idx + 1);
   else if (k === "ArrowLeft" || (k === " " && e.shiftKey)) go(idx - 1);
-  else if (k === "1" || k === "2" || k === "3") setRegion(hover, Number(k) - 1);
+  else if ((k === "1" || k === "2" || k === "3") && !showRaw) setRegion(hover, Number(k) - 1);
   else if (k === "a") setAll(0);
   else if (k === "A") setAll(1);
   else if (k === "z" || k === "Z") undo();

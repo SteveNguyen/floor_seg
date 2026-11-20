@@ -101,6 +101,17 @@ def test_save_merges(url, data):
     assert "b" not in json.loads((data / "edits.json").read_text())
 
 
+def test_save_polygons_from_the_page(url, data):
+    """The page sends the frame's whole polygon list: it replaces the old one; an empty list removes it."""
+    labels = {"1": "floor", "2": "obstacle", "3": "floor"}  # = pre-labels
+    new = {"label": "ignore", "pts": [[10.4, 10], [50, 10], [50, 40.6]]}
+    assert post(url + "/api/save", {"frames": {"a": {"labels": labels, "poly": [new]}}})[0] == 200
+    a = json.loads((data / "edits.json").read_text())["a"]
+    assert a == {"note": "kept", "poly": [{"label": "ignore", "pts": [[10, 10], [50, 10], [50, 41]]}]}
+    post(url + "/api/save", {"frames": {"a": {"labels": labels, "poly": []}}})
+    assert json.loads((data / "edits.json").read_text())["a"] == {"note": "kept"}
+
+
 def test_save_folds_all(data):
     """An "all" reset written by hand becomes explicit lists (same labels for label_real apply)."""
     (data / "edits.json").write_text(json.dumps({"a": {"all": "obstacle", "floor": [3]}}))
@@ -112,7 +123,11 @@ def test_save_folds_all(data):
 
 @pytest.mark.parametrize("frames", [{"zz": {"labels": {}}},                                    # unknown frame
                                     {"a": {"labels": {"1": "floor"}}},                         # missing regions
-                                    {"a": {"labels": {"1": "floor", "2": "floor", "3": "x"}}}])  # bad label
+                                    {"a": {"labels": {"1": "floor", "2": "floor", "3": "x"}}},   # bad label
+                                    {"a": {"labels": {"1": "floor", "2": "floor", "3": "floor"},  # 2-point polygon
+                                           "poly": [{"label": "floor", "pts": [[0, 0], [1, 1]]}]}},
+                                    {"a": {"labels": {"1": "floor", "2": "floor", "3": "floor"},  # bad polygon label
+                                           "poly": [{"label": "x", "pts": [[0, 0], [1, 1], [2, 0]]}]}}])
 def test_save_rejects(url, data, frames):
     before = (data / "edits.json").read_text()
     code, j = post(url + "/api/save", {"frames": frames})
