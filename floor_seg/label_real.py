@@ -4,11 +4,12 @@
     #    (each spot folder holds a recording sweep as frames/*.jpg; needs a GPU and `transformers`)
     python -m floor_seg.label_real prelabel --model models/floor_v1/best.pt \
         --out data/real/test_v1 --per-spot 5 recordings/*/spot*
-    # 2. review data/real/test_v1/review/*.jpg, write data/real/test_v1/edits.json:
+    # 2. review with the click-to-label page (python -m floor_seg.label_page data/real/test_v1), which writes
+    #    edits.json + reviewed.json; or review data/real/test_v1/review/*.jpg and write edits.json by hand:
     #    {"<name>": {"all": "floor"|"obstacle" (optional reset), "floor": [ids], "obstacle": [ids], "ignore": [ids],
     #                "poly": [{"label": "obstacle", "pts": [[x, y], ...]}]}}   (polygons in 640x360 px, applied last)
     # 3. write final labels <name>_floor.png (0 obstacle, 1 floor, 255 ignore)
-    python -m floor_seg.label_real apply --out data/real/test_v1
+    python -m floor_seg.label_real apply --out data/real/test_v1 [--reviewed-only]
 
 Pixels that no SAM2 region covers become extra regions when they form blobs (>= MIN_GAP px); thin seams are ignore.
 Label rule (project decision): anything > 1 cm above the floor is an obstacle; rugs (edges and surface), cables
@@ -128,10 +129,18 @@ def prelabel(args):
 
 
 def apply(args):
+    """Write <name>_floor.png for every frame, or only args.names (a set) when given: label_page passes its reviewed
+    frames, so unreviewed model guesses do not become labels. Returns the number of frames written."""
     edits_path = os.path.join(args.out, "edits.json")
     edits = json.load(open(edits_path)) if os.path.exists(edits_path) else {}
+    names = getattr(args, "names", None)
+    if getattr(args, "reviewed_only", False):  # list written by floor_seg.label_page
+        names = set(json.load(open(os.path.join(args.out, "reviewed.json"))))
+    written = 0
     for p in sorted(glob.glob(os.path.join(args.out, "*_init.json"))):
         name = os.path.basename(p)[:-len("_init.json")]
+        if names is not None and name not in names:
+            continue
         region_lab = json.load(open(p))
         e = edits.get(name, {})
         if e.get("all") in ("floor", "obstacle"):  # reset every region first, then the lists below apply
@@ -148,7 +157,9 @@ def apply(args):
         rgb = cv2.imread(os.path.join(args.out, name + ".jpg"))[:, :, ::-1]
         rev = review_image(np.ascontiguousarray(rgb), reg, lab)
         cv2.imwrite(os.path.join(args.out, "review", name + ".jpg"), rev[:, :, ::-1], [cv2.IMWRITE_JPEG_QUALITY, 85])
-    print(f"applied {len(edits)} edited frames", flush=True)
+        written += 1
+    print(f"applied: {written} label pngs written ({len(edits)} frames in edits.json)", flush=True)
+    return written
 
 
 def main():
@@ -161,6 +172,7 @@ def main():
     p.add_argument("spots", nargs="+")
     a = sub.add_parser("apply")
     a.add_argument("--out", required=True)
+    a.add_argument("--reviewed-only", action="store_true", help="only frames in reviewed.json (floor_seg.label_page)")
     args = ap.parse_args()
     prelabel(args) if args.cmd == "prelabel" else apply(args)
 

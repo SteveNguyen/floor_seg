@@ -113,6 +113,26 @@ python -m floor_seg.export_onnx --model models/floor_v2/best.pt --out floor.onnx
 
 Real frames from homes are private: keep them out of any public dataset.
 
+### Labelling real frames
+
+```bash
+# 1. SAM2 regions + model pre-labels: <name>.jpg, <name>_regions.png (uint16 ids), <name>_init.json (GPU)
+python -m floor_seg.label_real prelabel --model models/floor_v2/best.pt --out data/real/new_set recordings/*/spot*
+# 2. click-to-label page on http://127.0.0.1:8766 (local, offline): writes edits.json + reviewed.json
+python -m floor_seg.label_page data/real/new_set
+# 3. <name>_floor.png (0 obstacle, 1 floor, 255 ignore) for the reviewed frames (also the page's "apply" button)
+python -m floor_seg.label_real apply --out data/real/new_set --reviewed-only
+# 4. score
+python -m floor_seg.eval_real --data data/real/new_set --thr 0.5 0.8 models/floor_v2/best.pt
+```
+
+On the page: click a region to cycle floor (green) -> obstacle (red) -> ignore (grey); 1/2/3 set the region under
+the cursor; A all floor, Shift+A all obstacle; Z undo; R raw image; D driven-over hint (`<name>_driven.png`, blue);
+V toggle reviewed; Enter reviewed + save + next; arrows / Space browse; S save. Anything > 1 cm above the floor is
+an obstacle; rugs, cables, thresholds and doorsteps the robot can drive over are floor. Hand polygons (`"poly"`)
+in edits.json are kept and applied last. eval_real scores every `_floor.png` in the folder, so delete stale ones
+from an earlier apply without `--reviewed-only`.
+
 ## Hugging Face folders (local only)
 
 ```bash
@@ -157,6 +177,7 @@ floor_seg/floor_tex.py    floor retexturing augmentation (needs depth + pose + l
 floor_seg/thor_render.py  ProcTHOR / AI2-THOR renderer
 floor_seg/eval_real.py    scores on real labelled frames
 floor_seg/label_real.py   SAM2-assisted labelling of real frames
+floor_seg/label_page.py   click-to-label review page for label_real output
 floor_seg/predict.py      mask + overlay CLI
 floor_seg/export_onnx.py  ONNX export
 floor_seg/dataset/        real home dataset: import, privacy, review, consent, export
