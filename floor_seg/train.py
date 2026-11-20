@@ -17,6 +17,9 @@ precision, recall) are reported but best.pt is still chosen on floor IoU.
     python -m floor_seg.train --data data/synth/thor_v3 --out models/floor_v5_under --tex data/textures/ambientcg --under
     # several folders are mixed (thor_v1 views have no _under.png: they train the floor output only)
     python -m floor_seg.train --data data/synth/thor_v1 data/synth/thor_v3 --out models/floor_v6_mix --tex data/textures/ambientcg --under
+--aug-structures (off by default): after the retexturing, paint tiled plinths on wall bases (obstacle), threshold
+strips across the floor (flush: floor, raised step: obstacle) and sun streaks / specular highlights (floor), placed
+in metres with the same depth + pose (floor_seg/aug_structures.py); --aug-p-* set their probabilities.
 Saves best.pt (by floor IoU), last.pt, floor.onnx (fp32, from best) and metrics.jsonl.
 """
 import argparse
@@ -31,6 +34,7 @@ import torch
 from torch.utils.data import ConcatDataset, DataLoader, Dataset
 
 from floor_seg import DEFAULT_CALIB
+from floor_seg.aug_structures import StructAug, StructAugCfg
 from floor_seg.export_onnx import export
 from floor_seg.floor_tex import FloorTex
 from floor_seg.model import IN_H, IN_W, MEAN, STD, FloorNet
@@ -63,11 +67,12 @@ def seg_loss(logits, lab, w_under=1.0):
 
 
 class Renders(Dataset):
-    def __init__(self, root, names, train, poses=None, ftex=None, under=False):
+    def __init__(self, root, names, train, poses=None, ftex=None, under=False, saug=None):
         """poses: name -> (pitch deg, roll deg, camera height m); ftex: FloorTex for floor retexturing (train only,
-        needs poses); under: also read <name>_under.png (labels: encode_labels)."""
+        needs poses); under: also read <name>_under.png (labels: encode_labels); saug: StructAug (train only,
+        needs poses), None = off."""
         self.root, self.names, self.train = root, names, train
-        self.poses, self.ftex, self.under = poses, ftex, under
+        self.poses, self.ftex, self.under, self.saug = poses, ftex, under, saug
 
     def __len__(self):
         return len(self.names)
@@ -121,10 +126,13 @@ class Renders(Dataset):
             mask = encode_labels(floor, None if u is None else (u > 127).astype(np.uint8))
         if self.train:
             rng = random.Random(random.getrandbits(32))
-            if self.ftex is not None:  # first, while pixels still match the stored depth and pose
+            if self.ftex is not None or self.saug is not None:  # first, while pixels match the stored depth / pose
                 depth = cv2.imread(base + "_depth.png", cv2.IMREAD_UNCHANGED)
                 pitch, roll, h = self.poses[self.names[i]]
+            if self.ftex is not None:
                 img = self.ftex.apply(img, floor, depth, pitch, roll, rng, cam_h=h)
+            if self.saug is not None:  # after the retexturing: plinths copy the (new) floor texture
+                img, mask, _ = self.saug.apply(img, mask, depth, pitch, roll, h, rng)
             img, mask = self.augment(img, mask, rng)
         img = cv2.resize(img, (IN_W, IN_H), interpolation=cv2.INTER_AREA)[:, :, ::-1].astype(np.float32) / 255
         mask = cv2.resize(mask, (IN_W, IN_H), interpolation=cv2.INTER_NEAREST)
@@ -132,17 +140,19 @@ class Renders(Dataset):
         return torch.from_numpy(x.copy()), torch.from_numpy(mask.astype(np.int64))
 
 
-def datasets(roots, under=False, kinds=None, ftex=None):
+def datasets(roots, under=False, kinds=None, ftex=None, saug=None):
     """Train and val datasets over one or several render folders (e.g. thor_v1 + thor_v3), each split by house
     (house % 10 == 0 -> val). One Renders per folder: view names repeat across folders (same house, same index),
-    so names and poses stay per folder. kinds: keep only these view kinds (thor_v1 has none: all floor views)."""
+    so names and poses stay per folder. kinds: keep only these view kinds (thor_v1 has none: all floor views).
+    ftex, saug: training augmentations (validation is never augmented)."""
     tr, va = [], []
     for root in roots:
         stats = [json.loads(line) for line in open(os.path.join(root, "stats.jsonl"))]
         if kinds:
             stats = [s for s in stats if s.get("kind", "floor") in kinds]
         poses = {s["name"]: (s["pitch"], s["roll"], s["h"]) for s in stats}
-        tr.append(Renders(root, [s["name"] for s in stats if s["house"] % 10 != 0], True, poses, ftex, under=under))
+        tr.append(Renders(root, [s["name"] for s in stats if s["house"] % 10 != 0], True, poses, ftex, under=under,
+                          saug=saug))
         va.append(Renders(root, [s["name"] for s in stats if s["house"] % 10 == 0], False, under=under))
     return ConcatDataset(tr), ConcatDataset(va)
 
@@ -174,7 +184,16 @@ def evaluate(model, loader, dev):
     return m
 
 
-def main():
+def struct_aug(args):
+    """StructAug from the command line, or None (default: --aug-structures not given, training data unchanged)."""
+    if not args.aug_structures:
+        return None
+    cfg = StructAugCfg(p_plinth=args.aug_p_plinth, p_threshold=args.aug_p_threshold, p_step=args.aug_p_step,
+                       p_sun=args.aug_p_sun, p_specular=args.aug_p_specular)
+    return StructAug(cfg, args.calib)
+
+
+def build_parser():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--data", required=True, nargs="+", help="one or several render folders (mixed, each split by house)")
     ap.add_argument("--out", required=True)
@@ -188,13 +207,25 @@ def main():
     ap.add_argument("--under", action="store_true", help="3-channel model with the 'under' output (needs _under.png)")
     ap.add_argument("--w-under", type=float, default=1.0, help="weight of the under loss (with --under)")
     ap.add_argument("--backbone", choices=["small", "large"], default="small", help="MobileNetV3 size (model.FloorNet)")
-    args = ap.parse_args()
+    d = StructAugCfg()
+    ap.add_argument("--aug-structures", action="store_true",
+                    help="plinths, threshold strips / steps, sun streaks and highlights (floor_seg/aug_structures.py)")
+    ap.add_argument("--aug-p-plinth", type=float, default=d.p_plinth, help="with --aug-structures")
+    ap.add_argument("--aug-p-threshold", type=float, default=d.p_threshold, help="with --aug-structures")
+    ap.add_argument("--aug-p-step", type=float, default=d.p_step, help="share of thresholds drawn as raised steps")
+    ap.add_argument("--aug-p-sun", type=float, default=d.p_sun, help="with --aug-structures")
+    ap.add_argument("--aug-p-specular", type=float, default=d.p_specular, help="with --aug-structures")
+    return ap
+
+
+def main():
+    args = build_parser().parse_args()
     os.makedirs(args.out, exist_ok=True)
     random.seed(0)
     torch.manual_seed(0)
 
     ftex = FloorTex(args.tex, args.calib) if args.tex else None
-    train_ds, val_ds = datasets(args.data, args.under, args.kinds, ftex)
+    train_ds, val_ds = datasets(args.data, args.under, args.kinds, ftex, struct_aug(args))
     print(f"train {len(train_ds)} views, val {len(val_ds)} views (by house)", flush=True)
     tl = DataLoader(train_ds, batch_size=args.batch,
                     shuffle=True, num_workers=args.workers, drop_last=True, persistent_workers=True)
