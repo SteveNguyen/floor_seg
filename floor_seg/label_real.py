@@ -103,7 +103,8 @@ def labels_from(reg, region_lab):
 
 def prelabel(args):
     from transformers import pipeline
-    gen = pipeline("mask-generation", model="facebook/sam2.1-hiera-large", device=0)
+    # device: 0 = first CUDA GPU, -1 = CPU (much slower: ~1 min per frame for automatic masks)
+    gen = pipeline("mask-generation", model="facebook/sam2.1-hiera-large", device=args.device)
     model = load_torch(args.model)
     os.makedirs(os.path.join(args.out, "review"), exist_ok=True)
     for spot in args.spots:
@@ -117,7 +118,9 @@ def prelabel(args):
             reg = region_map(masks)
             with torch.no_grad():
                 logits = model(torch.from_numpy(preprocess(rgb)))[0]
-            prob = torch.softmax(logits, 0)[1].numpy()
+            # floor vs not-floor from the first two channels only: a 3-channel (under) model's third channel
+            # is a separate head (model.py), and a softmax over all three would dilute the floor probability
+            prob = torch.softmax(logits[:2], 0)[1].numpy()
             prob = cv2.resize(prob, (W, H), interpolation=cv2.INTER_LINEAR)
             region_lab = {int(r): int(prob[reg == r].mean() > 0.5) for r in np.unique(reg[reg > 0])}
             cv2.imwrite(os.path.join(args.out, name + ".jpg"), bgr, [cv2.IMWRITE_JPEG_QUALITY, 95])
@@ -169,6 +172,7 @@ def main():
     p.add_argument("--model", required=True)
     p.add_argument("--out", required=True)
     p.add_argument("--per-spot", type=int, default=5)
+    p.add_argument("--device", type=int, default=0, help="SAM2 device: CUDA index, or -1 for the CPU")
     p.add_argument("spots", nargs="+")
     a = sub.add_parser("apply")
     a.add_argument("--out", required=True)
