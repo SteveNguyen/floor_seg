@@ -57,6 +57,13 @@ def test_projection_inverts_the_ray_geometry(sa, scene):
     assert np.nanmax(np.abs(u - xs)) < 0.05 and np.nanmax(np.abs(v - ys)) < 0.05
 
 
+def test_reproject_no_points(sa, scene):
+    # a level change whose floor beyond the edge is all hidden: no point to reproject (crashed v8 training)
+    e = np.zeros(0)
+    col, okf, oke = sa.reproject(scene[0].astype(np.float32) / 255, scene[1], geom(sa, scene), e, e, 1.0, (0.0, 1.0))
+    assert col.shape == (0, 3) and okf.shape == oke.shape == (0,)
+
+
 @pytest.mark.parametrize("plain", [0.0, 1.0])
 def test_plinth_is_on_the_wall_base_with_its_metric_height(sa, scene, plain):
     bgr, label, _ = scene

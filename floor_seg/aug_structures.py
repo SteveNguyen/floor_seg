@@ -367,6 +367,8 @@ class StructAug:
         extruded (only with extrude_v, step down): the pixel shows a wall / object standing beyond the edge (its
         across coordinate, along nrm, > extrude_v): the lower floor point is hidden by that surface's downward
         extension, so it takes its colour."""
+        if len(gx) == 0:   # no point (a level change whose far floor is all hidden): cv2.projectPoints returns None
+            return np.zeros((0, 3), np.float32), np.zeros(0, bool), np.zeros(0, bool)
         u, v = self.project(gx, gz, np.zeros_like(gx), geo)
         inside = np.isfinite(u) & np.isfinite(v) & (u > -0.5) & (u < W - 0.5) & (v > -0.5) & (v < H - 0.5)
         ui = np.clip(np.nan_to_num(np.round(u)), 0, W - 1).astype(int)
