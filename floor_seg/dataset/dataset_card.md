@@ -24,7 +24,7 @@ balancing wheeled base, driven by phone teleoperation, close to the floor. Made 
 floors: rugs, doormats, thresholds, shiny, sunlit and dark floors, cables, chair legs, clutter.
 
 Every home in this dataset was recorded with the written consent of its owner or tenant, who reviewed every frame
-before release. No floor labels yet (TODO: labelling, same rule as the synthetic set: anything more than 1 cm above
+before release. No floor labels yet (to be done: labelling, same rule as the synthetic set: anything more than 1 cm above
 the floor is an obstacle; cables, door thresholds, rug edges and rug surfaces are floor).
 
 ## Content
@@ -67,8 +67,8 @@ Before anything left the recording laptop:
    (`floor_seg.dataset.review`).
 4. Only sessions with written consent were exported (`floor_seg.dataset.consent`, `floor_seg.dataset.export`).
 
-To have a frame or a whole home removed, open an issue or contact Pollen Robotics (TODO: contact address).
+To have a frame or a whole home removed, open an issue or contact Pollen Robotics (contact address: to be completed before release).
 
 ## License
 
-CC BY 4.0. Attribution: Pollen Robotics (TODO: final wording, citation).
+CC BY 4.0. Attribution: Pollen Robotics (final wording and citation: to be completed before release).

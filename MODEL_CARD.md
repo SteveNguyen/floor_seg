@@ -26,7 +26,7 @@ robot's Raspberry Pi CM4 at ~9 Hz (fp32, ONNX Runtime, 1 thread). Trained only o
   (equivalently `logit[1] - logit[0] > ln 4`).
 - Files: `model.safetensors` + `config.json` (PyTorch, `floor_seg.model.FloorNet`), `floor.onnx`
   (fp32, opset 17, input `input`, output `logits`), `metrics.jsonl` (synthetic validation per epoch).
-- Code: `floor_seg` Python package (training, rendering, evaluation; repository URL TODO).
+- Code: `floor_seg` Python package (training, rendering, evaluation): https://github.com/SteveNguyen/floor_seg
 
 ## Label definition
 

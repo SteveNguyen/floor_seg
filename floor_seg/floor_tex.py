@@ -160,7 +160,7 @@ class FloorTex:
             col = col * np.array([rng.uniform(0.8, 1.2) for _ in range(3)], np.float32) * rng.uniform(0.5, 1.1)
             out[m] = (col * shade)[m]
         if cam_h is not None and self.floor_groups and rng.random() < P_NEG:
-            # Texture-swap negatives: a wooden bed frame on a wooden floor was called floor (hb_nav ISSUES #37).
+            # Texture-swap negatives: a wooden bed frame on a wooden floor was called floor (seen in simulation).
             # 1-3 obstacle surfaces reaching below NEG_MAX_H get the floor's texture (or another floor texture),
             # with their own shading, so the texture alone cannot mean floor: the model has to use geometry and
             # context. Surfaces = obstacle pixels split at depth edges (> 3 % per pixel), retextured whole (no

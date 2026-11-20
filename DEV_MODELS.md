@@ -39,9 +39,12 @@ so compare that column within a row group only. Real = 50 hand-labelled home fra
 - **Table views hurt real floor** (v6 -> v7): they label visible floor below the table as not floor.
 - **v7 vs B on real frames**: same false floor; the remaining ~0.02 IoU gap is mostly two frames (sunlit dark
   shiny tiles, a slatted wooden bath mat). The under head costs ~0.005.
-- **Closed-loop sim** (hb_nav v3 behaviour, 16 houses, same seed): v7 drives 4.19 m mean (B 3.43), sees more
+- **Closed-loop sim** (the Python prototype's v3 behaviour, 16 houses, same seed): v7 drives 4.19 m mean (B 3.43), sees more
   floor (0.548 vs 0.511) and passes the bed frame B collided with. Using the under output as obstacles changed
   nothing measurable in 16 episodes.
+- **Second real test set** (75 hand-labelled frames from the robot's own runs, private, grouped by difficulty;
+  `floor_seg.eval_real --groups`): v7_floor_under floor IoU 0.946 / 0.932 at cutoff 0.5 / 0.7; weakest on wall
+  plinths (14 % false floor at 0.5) and on doorsteps (5-13 % missed floor), the targets of v8.
 
 ## The "under" output
 
@@ -63,7 +66,7 @@ python -m floor_seg.train --data data/synth/thor_v1 data/synth/thor_v3 --kinds f
     --out models/floor_v7_floor_under --tex data/textures/ambientcg --under
 ```
 
-## Training command (v8, not trained yet): v7 + structure augmentations
+## Training command (v8, in training): v7 + structure augmentations
 
 Same recipe plus `--aug-structures` ([floor_seg/aug_structures.py](floor_seg/aug_structures.py)): tiled plinths on
 wall bases (obstacle), flush threshold strips (floor), level changes (the floor beyond an edge 2-18 cm higher or

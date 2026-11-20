@@ -14,6 +14,10 @@ tags:
 
 # Reachy Mini synthetic floor segmentation: thor_v3 (internal, private)
 
+> This card describes a private dataset that is not downloadable yet: it documents how the development models
+> were trained. A public synthetic dataset is planned (`DATASET_CARD.md`) once the licence check is done; the
+> renders can be reproduced with `floor_seg/thor_render.py`.
+
 Internal training set for the Reachy Mini floor segmentation model. Synthetic views of furnished, cluttered
 ProcTHOR houses seen from the Reachy Mini head camera close to the floor, with two per-pixel masks per view:
 **floor** and **under** (floor the robot cannot drive to because something lower than 0.45 m is above it).

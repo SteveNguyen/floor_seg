@@ -12,11 +12,8 @@ floor model gets wrong, seen from the robot's own camera (about 0.35 m above the
 
 ## Start / stop
 
-<!-- TODO: exact Navette commands for the teleoperation mode (being built): start the runtime with recording on,
-     open the phone teleop page, stop and find the run folder. -->
-
-- Start: `TODO`
-- Stop: `TODO`
+*To be completed: the exact Navette commands to start the runtime with recording on, open the phone teleop page,
+stop, and find the run folder.*
 - The run folder (`navette-YYYYMMDD-HHMMSS`) stays on the laptop; import it with
   `python -m floor_seg.dataset.import_run RUN_DIR STAGING --session homeNN` (one session id per recording, no
   names in it).

@@ -4,9 +4,12 @@ Floor segmentation for the Reachy Mini head camera: which pixels are drivable fl
 LR-ASPP / MobileNetV3-Small network, trained only on synthetic renders of ProcTHOR houses, that runs on the
 robot's CM4 at ~9 Hz in fp32 with ONNX Runtime.
 
-- Model (planned): [pollen-robotics/reachy-mini-floor-seg](https://huggingface.co/pollen-robotics/reachy-mini-floor-seg) — card: [MODEL_CARD.md](MODEL_CARD.md)
-- Dataset (planned): [pollen-robotics/reachy-mini-floor-synth](https://huggingface.co/datasets/pollen-robotics/reachy-mini-floor-synth) — card: [DATASET_CARD.md](DATASET_CARD.md)
-- Development models (private, floor + "under" output; versions, data and scores): [DEV_MODELS.md](DEV_MODELS.md)
+- Model: `pollen-robotics/reachy-mini-floor-seg` on the Hugging Face Hub (planned, not published yet) — card:
+  [MODEL_CARD.md](MODEL_CARD.md)
+- Dataset: `pollen-robotics/reachy-mini-floor-synth` on the Hugging Face Hub (planned, not published yet: the
+  AI2-THOR / ProcTHOR redistribution check is open) — card: [DATASET_CARD.md](DATASET_CARD.md)
+- Development models (working versions, floor + "under" output; versions, data and scores):
+  [DEV_MODELS.md](DEV_MODELS.md)
 
 **Label rule:** anything more than 1 cm above the floor is an obstacle; cables, door thresholds, rug edges and
 rug surfaces are floor. From the thor_v3 renders on, each view has a second mask, `_under.png`: floor pixels
@@ -66,7 +69,7 @@ PyTorch:
 import cv2, torch
 from floor_seg.model import THRESHOLD, load_torch, preprocess
 
-model = load_torch("pollen-robotics/reachy-mini-floor-seg")   # or a local folder, or a best.pt state dict
+model = load_torch("models/floor_v2")   # a local folder, a best.pt state dict, or a Hub repo id once published
 rgb = cv2.imread("frame.jpg")[:, :, ::-1].copy()
 with torch.no_grad():
     prob = torch.softmax(model(torch.from_numpy(preprocess(rgb))), 1)[0, 1]   # 192 x 320

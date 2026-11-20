@@ -30,7 +30,7 @@ robots. Under this licence anyone may copy, use and modify the data, including c
 ## Your right to withdraw
 
 You may withdraw your consent at any time, without giving a reason, by contacting
-<!-- TODO: contact address -->. The recording is then deleted from our computers and removed from the next version
+*[contact address, to be completed before use]*. The recording is then deleted from our computers and removed from the next version
 of the dataset. Copies that others have already downloaded from a published version cannot be recalled.
 
 ## Consent
