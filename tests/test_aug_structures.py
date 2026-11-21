@@ -12,7 +12,7 @@ from floor_seg.aug_structures import UNDER, Geom, StructAug, StructAugCfg
 from floor_seg.floor_tex import H, W, floor_coords, heights
 
 CAM_H, PITCH, ROLL, WALL_Z = 0.27, 18.0, 1.5, 2.0
-OFF = StructAugCfg(p_plinth=0.0, p_threshold=0.0, p_level=0.0, p_sun=0.0, p_specular=0.0)
+OFF = StructAugCfg(p_plinth=0.0, p_threshold=0.0, p_level=0.0, p_sun=0.0, p_specular=0.0, p_wall_tiles=0.0)
 
 
 @pytest.fixture(scope="module")
@@ -64,21 +64,49 @@ def test_reproject_no_points(sa, scene):
     assert col.shape == (0, 3) and okf.shape == oke.shape == (0,)
 
 
-@pytest.mark.parametrize("plain", [0.0, 1.0])
-def test_plinth_is_on_the_wall_base_with_its_metric_height(sa, scene, plain):
+@pytest.mark.parametrize("style", StructAug.PLINTH_STYLES)
+def test_plinth_is_on_the_wall_base_with_its_metric_height(sa, scene, style):
     bgr, label, _ = scene
-    img, lab, info = run(sa, scene, p_plinth=1.0, p_plinth_plain=plain)
+    weights = tuple(float(s == style) for s in StructAug.PLINTH_STYLES)
+    img, lab, info = run(sa, scene, p_plinth=1.0, plinth_style=weights)
     hp = info["plinth"]["h"]
+    assert 0.08 <= hp <= 0.20 and info["plinth"]["style"] == style
     painted = (img != bgr).any(axis=2)
     hgt = geom(sa, scene).hgt
     assert painted.sum() > 1000
     assert (label[painted] == 0).all()                    # only wall pixels
     assert np.array_equal(lab, label)                     # obstacle stays obstacle; nothing else changes
-    assert hgt[painted].max() <= hp + 1e-3 and hgt[painted].min() > -0.02
+    # the board up to hp, plus its joint line on the wall just above (<= 5 mm)
+    assert hgt[painted].max() <= hp + 0.006 and hgt[painted].min() > -0.02
     # it covers the whole wall base up to hp, in metres (the wall spans the image width)
     wall_low = (label == 0) & (hgt < hp - 0.01) & (hgt > 0.005)
     assert painted[wall_low].mean() > 0.95
-    assert info["plinth"]["plain"] == bool(plain)
+    mid = wall_low & (hgt > 0.01) & (hgt < hp - 0.012)    # the board's face: no edge / contact lines
+    face = img[mid].astype(float).mean(axis=0)
+    if style == "wall":      # blends with the wall (plain grey 170 in the scene): a shade off
+        assert np.all(np.abs(face - 170) < 0.2 * 170)
+    elif style == "white":
+        assert face.min() > 190
+
+
+def test_wall_tiles_up_to_their_height(sa, scene):
+    bgr, label, _ = scene
+    img, lab, info = run(sa, scene, seed=4, p_wall_tiles=1.0, p_plinth=1.0)
+    t = info["wall_tiles"]
+    assert t and 0.5 <= t["h"] <= 2.0 and not info.get("plinth")   # tiles instead of a plinth
+    painted = (img != bgr).any(axis=2)
+    hgt = geom(sa, scene).hgt
+    assert (label[painted] == 0).all() and np.array_equal(lab, label)   # wall pixels, obstacle
+    assert hgt[painted].max() <= t["h"] + 1e-3
+    wall_low = (label == 0) & (hgt < min(t["h"], 0.4) - 0.01) & (hgt > 0.005)
+    assert painted[wall_low].mean() > 0.95
+
+
+def test_defaults_match_the_v9_plan():
+    d = StructAugCfg()
+    assert d.p_sun == 0.0 and d.p_specular == 0.0         # off: v8 called white wall bases floor
+    assert d.level_dz == (0.10, 0.20) and d.p_level_flat == 0.5 and d.p_flat_other > 0.5
+    assert d.plinth_h == (0.08, 0.20) and d.p_plinth >= 0.5
 
 
 def test_flush_threshold_stays_floor(sa, scene):
@@ -92,7 +120,9 @@ def test_flush_threshold_stays_floor(sa, scene):
     assert (label[painted] == 1).all()                    # painted on plain floor only (not under, not wall)
 
 
-LEVEL = dict(p_level=1.0, p_level_flat=0.0, p_level_other=0.0, thr_dist=(0.7, 0.9))
+# steps at the low end of the default 10-20 cm: with the scene's camera 0.27 m high, a 20 cm raised floor is
+# nearly at eye level and its top a sliver, too few pixels for the metric checks
+LEVEL = dict(p_level=1.0, p_level_flat=0.0, p_level_other=0.0, thr_dist=(0.7, 0.9), level_dz=(0.10, 0.12))
 
 
 def across(g, lv):
@@ -116,7 +146,7 @@ def test_step_up_riser_and_raised_floor_in_metres(sa, scene):
     img, lab, info = run(sa, scene, seed=0, p_level_up=1.0, **LEVEL)
     lv = info["level"]
     dz, ve = lv["dz"], lv["ve"]
-    assert lv["up"] and 0.02 <= dz <= 0.18 and not lv["flat"]
+    assert lv["up"] and 0.10 <= dz <= 0.20 and not lv["flat"]
     g = geom(sa, scene)
     dv = across(g, lv)
     painted = (img != bgr).any(axis=2)
@@ -142,7 +172,7 @@ def test_step_down_lower_floor_slides_up(sa, scene):
     img, lab, info = run(sa, scene, seed=0, p_level_up=0.0, **LEVEL)
     lv = info["level"]
     dz, ve = lv["dz"], lv["ve"]
-    assert not lv["up"] and -0.18 <= dz <= -0.02
+    assert not lv["up"] and -0.20 <= dz <= -0.10
     g = geom(sa, scene)
     dv = across(g, lv)
     vf = g.tf * dv
@@ -157,12 +187,14 @@ def test_step_down_lower_floor_slides_up(sa, scene):
     assert checker_match(bgr, g, g.tf, far) > 0.95 and checker_match(img, g, g.tf, far) < 0.8  # really moved
 
 
-def test_drivable_level_change_stays_floor(sa, scene):
+@pytest.mark.parametrize("other", [0.0, 1.0])
+def test_drivable_level_change_stays_floor(sa, scene, other):
+    # flat flooring change, with the same floor or another flooring beyond the edge: floor all the same
     bgr, label, _ = scene
     for up in (0.0, 1.0):
-        img, lab, info = run(sa, scene, seed=3, **dict(LEVEL, p_level_flat=1.0, p_level_up=up))
+        img, lab, info = run(sa, scene, seed=3, **dict(LEVEL, p_level_flat=1.0, p_level_up=up, p_flat_other=other))
         lv = info["level"]
-        assert lv["flat"] and abs(lv["dz"]) <= 0.01
+        assert lv["flat"] and abs(lv["dz"]) <= 0.01 and lv["other"] == bool(other)
         painted = (img != bgr).any(axis=2)
         assert painted.sum() > 300 and np.array_equal(lab, label)
         assert (label[painted] == 1).all()
@@ -226,6 +258,10 @@ def test_off_by_default(renders):
     assert all(d.saug is None for d in tr.datasets)
     on = build_parser().parse_args(["--data", "d", "--out", "x", "--aug-structures", "--aug-p-level", "0.5"])
     assert struct_aug(on).cfg.p_level == 0.5 and struct_aug(on).cfg.p_plinth == StructAugCfg().p_plinth
+    # run A of the v9 plan: no plinth, no wall tiles (sun / specular off by default)
+    a = struct_aug(build_parser().parse_args(["--data", "d", "--out", "x", "--aug-structures", "--aug-p-plinth", "0",
+                                              "--aug-p-wall-tiles", "0"])).cfg
+    assert (a.p_plinth, a.p_wall_tiles, a.p_sun, a.p_specular) == (0.0, 0.0, 0.0, 0.0) and a.p_threshold > 0
 
 
 def test_zero_probabilities_are_identity(sa, scene):

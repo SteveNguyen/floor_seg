@@ -14,10 +14,14 @@ in the camera-yaw frame is (gx right, gz forward, height above the floor), all l
              touches the floor (< contact_h), followed upward while the surface stays vertical (horizontal
              distance changes much less than height, pixel to pixel), and kept only if that vertical surface rises
              >= wall_min_h or leaves the image (a wall or a tall cabinet, not a box). The band of those pixels
-             below a metric height (plinth_h) is painted with the image's own floor texture (a top-down patch
-             of the floor near the camera, cut by inverse perspective and laid along the wall in metres: same
-             tiles, same scale) or, with p_plinth_plain, a plain skirting colour; thin top edge and bottom joint.
+             below a metric height (plinth_h, 8-20 cm) is painted as a skirting board, one style per image
+             (plinth_style): the wall's own colour a shade off, white, wood grain along the board, the image's
+             own floor tiles (a top-down patch of the floor near the camera, cut by inverse perspective and laid
+             along the wall in metres: same tiles, same scale), or plain grey / black. The board stands ~1 cm
+             proud of the wall: lit top edge, dark joint line on the wall above it, dark contact line at the floor.
              Label: obstacle (it was a wall pixel already: no label changes).
+  wall tiles same wall bases, tiled (bathroom, kitchen) from the floor up to wall_tile_h with procedural tiles
+             unlike the floor's; instead of a plinth. Label: obstacle (unchanged).
   threshold  a strip of another material (wood, metal, stone, tile, dark vinyl), thr_width deep, at 0.5-2.5 m
              ahead, roughly across the view (+-thr_angle), door-wide (p_door) or spanning the room (then with
              p_transition the floor beyond it gets another tiling, as at a room transition). Door openings are
@@ -30,9 +34,11 @@ in the camera-yaw frame is (gx right, gz forward, height above the floor), all l
              higher (step up) or lower (step down), room-wide (a door-wide one, without door jambs in the
              render, looks like a platform / trench in the room; across a rendered doorway the room-wide edge
              gives the real picture). Labels follow the robot's rule
-             (only floor at its own level is drivable): |dz| >= 2 cm -> riser and the floor beyond are obstacle;
-             with p_level_flat |dz| <= 1 cm, a thin edge line only, everything stays floor, so the model has to
-             learn the edge geometry, not "an edge across the floor = stop".
+             (only floor at its own level is drivable): a real step, |dz| 10-20 cm -> riser and the floor beyond
+             are obstacle; with p_level_flat (half of them) |dz| <= 1 cm, a thin edge line only, everything stays
+             floor, mostly with another flooring beyond (p_flat_other), so the model has to learn the edge
+             geometry, not "an edge or a new flooring across the floor = stop". Nothing in between: a 2-8 cm step
+             is rare in homes and hardly visible in one image (v8 trained on them and refused flat doorways).
              Step up: a box (edge .. 30 m beyond, height dz) ray-traced with the stored depth as z-buffer:
              objects closer than its surface keep occluding it; it covers the bottom dz of whatever stands
              beyond (walls then start on the raised floor, as they would). Faces: the riser (vertical, with a
@@ -51,9 +57,10 @@ in the camera-yaw frame is (gx right, gz forward, height above the floor), all l
              reflections on glossy tiles, image-space elongated quads from the far floor toward the camera,
              screen-blended to white. Labels unchanged. floor_tex (with --tex) already has one hard-edged sun
              parallelogram and a soft additive glare blob; these add the saturated, striped and reflection-shaped
-             cases that failed on dark shiny tiles, and work without --tex.
+             cases that failed on dark shiny tiles, and work without --tex. Off by default (p_sun = p_specular =
+             0): with them, v8 called bright white wall bases and plinths floor on real frames.
 
-Labels: only level changes (|dz| >= 2 cm) change labels (floor -> obstacle). 'under' pixels (train.UNDER) are
+Labels: only level changes (real steps) change labels (floor -> obstacle). 'under' pixels (train.UNDER) are
 never painted (no strip, plinth, step or light under a bed); beyond a non-drivable level edge they become obstacle
 (unreachable floor), unpainted. Deterministic given the random.Random passed in.
 
@@ -75,12 +82,19 @@ UNDER = 2  # = floor_seg.train.UNDER (not imported: train imports this module, a
 
 @dataclass
 class StructAugCfg:
-    # plinth / skirting board on wall bases (labelled obstacle)
-    p_plinth: float = 0.3
-    plinth_h: tuple = (0.05, 0.12)       # m, plinth height
-    p_plinth_plain: float = 0.3          # plain skirting colour instead of the floor's own texture
+    # plinth / skirting board on wall bases (labelled obstacle). Most home walls have one: a thin strip (~1 cm
+    # deep) 8-20 cm tall, painted to blend with the wall or white, sometimes bare wood, rarely tiles matching the
+    # floor (v8 had 70 % floor tiles and 5-12 cm: it did not help on real plinths)
+    p_plinth: float = 0.6
+    plinth_h: tuple = (0.08, 0.20)       # m, plinth height
+    # style weights: wall colour (a shade off), white, wood, the floor's own tiles, other plain (grey / black)
+    plinth_style: tuple = (0.4, 0.3, 0.15, 0.1, 0.05)
     wall_min_h: float = 0.4              # m, a vertical surface rising this high (or out of the image) is a wall
     contact_h: float = 0.03              # m, a non-floor pixel this close to the floor touches it
+    # tiled wall base (bathroom, kitchen): tiles unlike the floor's up to wall_tile_h (labelled obstacle); a wall
+    # gets either this or a plinth
+    p_wall_tiles: float = 0.1
+    wall_tile_h: tuple = (0.5, 2.0)      # m (above the image top: the whole visible wall)
     # threshold / doorstep strip across the floor (labelled floor)
     p_threshold: float = 0.3
     thr_dist: tuple = (0.5, 2.5)         # m ahead (gz) of a point of the strip / level edge
@@ -90,16 +104,22 @@ class StructAugCfg:
     door_len: tuple = (0.7, 1.0)         # m
     flush_h: tuple = (0.0, 0.012)        # m, flush / low threshold: floor (robot drives over it)
     p_transition: float = 0.3            # room-spanning strip: other flooring beyond it
-    # level change: the floor beyond a straight edge is higher or lower (placement as the strips)
+    # level change: the floor beyond a straight edge is higher or lower (placement as the strips). Real homes have
+    # drivable doorsteps or real steps, hardly anything in between: steps are 10-20 cm (a riser or a drop edge the
+    # image shows). v8 used 2-18 cm, mostly with no visible cue, and learned the shortcut "other flooring past a
+    # line = obstacle" (it refused flat doorways). Flat flooring changes, labelled floor, are now as frequent as
+    # steps and mostly show another flooring, so a texture change alone no longer means obstacle.
     p_level: float = 0.3
     p_level_up: float = 0.5              # step up, else step down
-    level_dz: tuple = (0.02, 0.18)       # m, |dz| of a step: riser and floor beyond are obstacle
-    p_level_flat: float = 0.2            # drivable level change instead: |dz| <= flat_dz, stays floor
+    level_dz: tuple = (0.10, 0.20)       # m, |dz| of a step: riser and floor beyond are obstacle
+    p_level_flat: float = 0.5            # drivable level change instead: |dz| <= flat_dz, stays floor
     flat_dz: float = 0.01                # m
-    p_level_other: float = 0.3           # other flooring beyond the edge
-    # light on the floor (labels unchanged)
-    p_sun: float = 0.25
-    p_specular: float = 0.2
+    p_level_other: float = 0.3           # step: other flooring beyond the edge
+    p_flat_other: float = 0.7            # flat change: other flooring beyond the edge
+    # light on the floor (labels unchanged). Off by default: with them on, v8 called bright white wall bases and
+    # plinths floor on real frames. Kept for experiments (train.py --aug-p-sun / --aug-p-specular).
+    p_sun: float = 0.0
+    p_specular: float = 0.0
 
 
 def lens_K_D(calib_path):
@@ -213,8 +233,11 @@ class StructAug:
             return bgr, label, info
         img, lab = bgr.astype(np.float32) / 255, label.copy()
         # decisions drawn up front: the probability of each augmentation does not depend on the others
-        do = [rng.random() < p for p in (c.p_plinth, c.p_threshold, c.p_level, c.p_sun, c.p_specular)]
-        if do[0]:
+        do = [rng.random() < p for p in (c.p_plinth, c.p_threshold, c.p_level, c.p_sun, c.p_specular,
+                                         c.p_wall_tiles)]
+        if do[5]:     # a tiled wall base has no plinth on top of it
+            info["wall_tiles"] = self.wall_tiles(img, lab, geo, rng)
+        elif do[0]:
             info["plinth"] = self.plinth(img, lab, geo, rng)
         if do[1]:
             info["threshold"] = self.threshold(img, lab, geo, free, rng)
@@ -292,17 +315,11 @@ class StructAug:
             return patch / np.maximum(flat, 0.2)[..., None]
         return None
 
-    def plinth(self, img, lab, geo, rng):
-        c = self.cfg
-        hp = rng.uniform(*c.plinth_h)
-        base, run = self.wall_base(lab, geo)
-        band = base & (geo.hgt <= hp) & (geo.hgt > -0.02)
-        if band.sum() < 200:
-            return None
-        free = geo.valid & (lab != 0) & (lab != UNDER)
-        patch = None if rng.random() < c.p_plinth_plain else self.floor_patch(img, free, geo, rng)
-        # along-wall coordinate (m) per column: arc length of the floor-contact line, from column to column
-        # (restarting at jumps between walls), so the texture keeps its metric scale on oblique walls
+    @staticmethod
+    def along_wall(band, run, geo, rng):
+        """Along-wall coordinate (m) of every pixel of a wall-base band: arc length of the floor-contact line from
+        column to column (restarting at jumps between walls), so a texture keeps its metric scale on oblique
+        walls. H x W, constant per column."""
         cols = np.nonzero(band.any(axis=0))[0]
         row0 = run[H - 1 - np.argmax(band[::-1, cols], axis=0), cols]   # contact row of each column's lowest band px
         cx, cz = geo.gx[row0, cols], geo.gz[row0, cols]
@@ -310,30 +327,88 @@ class StructAug:
         step = np.where(step > 0.15, rng.uniform(0, 1), step)
         s_col = np.zeros(W, np.float32)
         s_col[cols] = np.concatenate([[0], np.cumsum(step)]) + rng.uniform(0, 10)
-        s = np.broadcast_to(s_col[None, :], (H, W))
-        if patch is not None:   # floor tiles laid on the wall, mirrored at the patch borders (no seams)
+        return np.broadcast_to(s_col[None, :], (H, W))
+
+    @staticmethod
+    def wall_shade(img, band):
+        """The wall's own shading (light gradient, furniture shadows) over a band, relative to its median."""
+        bf = band.astype(np.float32)
+        lb = cv2.GaussianBlur(img.mean(axis=2) * bf, (0, 0), 4) / np.maximum(cv2.GaussianBlur(bf, (0, 0), 4), 1e-3)
+        return np.clip(lb / max(np.median(lb[band]), 1e-3), 0.3, 2.0)[..., None]
+
+    PLINTH_STYLES = ("wall", "white", "wood", "tiles", "plain")
+
+    def plinth(self, img, lab, geo, rng):
+        """A skirting board on the wall bases in view: the band of wall pixels below hp (metres), one style for
+        the image. The board stands ~1 cm proud of the wall, which shows as a thin lit top edge, a dark joint line
+        on the wall just above it, and a dark contact line at the floor (the 1 cm offset itself is below a pixel
+        at these distances: the band is painted in place)."""
+        c = self.cfg
+        hp = rng.uniform(*c.plinth_h)
+        base, run = self.wall_base(lab, geo)
+        band = base & (geo.hgt <= hp) & (geo.hgt > -0.02)
+        if band.sum() < 200:
+            return None
+        style = rng.choices(self.PLINTH_STYLES, weights=c.plinth_style)[0]
+        free = geo.valid & (lab != 0) & (lab != UNDER)
+        g = np.random.default_rng(rng.randint(0, 2**31))
+        s = self.along_wall(band, run, geo, rng)
+        patch = self.floor_patch(img, free, geo, rng) if style == "tiles" else None
+        if style == "tiles" and patch is None:
+            style = "white"                              # no clean floor patch to copy: a white board instead
+        if style == "tiles":   # floor tiles laid on the wall, mirrored at the patch borders (no seams)
             ppm, n = 256.0, patch.shape[0]
             a = _mirror(s * ppm, n)
             b = _mirror((hp - geo.hgt) * ppm + rng.uniform(0, n), n)
             col = cv2.remap(patch, a, b, cv2.INTER_LINEAR) * rng.uniform(0.6, 1.0)  # vertical face: less light
-            edge_gain = rng.choice([0.55, 1.3])         # grout / cut tile edge, darker or lighter
-        else:   # plain skirting: white, grey, wood, black, or the floor's own median colour
-            colour = rng.choice([(0.85, 0.87, 0.88), (0.6, 0.6, 0.6), (0.2, 0.35, 0.5), (0.1, 0.1, 0.1), None])
-            colour = np.median(img[free], axis=0) if colour is None or not free.any() else np.array(colour)
-            g = np.random.default_rng(rng.randint(0, 2**31))
-            col = colour.astype(np.float32) * (1 + 0.03 * g.normal(0, 1, (H, W, 1))).astype(np.float32)
-            edge_gain = 1.3                              # lit top bevel
-        # the wall's own shading (light gradient, shadows of furniture) carried onto the plinth
-        bf = band.astype(np.float32)
-        lb = cv2.GaussianBlur(img.mean(axis=2) * bf, (0, 0), 4) / np.maximum(cv2.GaussianBlur(bf, (0, 0), 4), 1e-3)
-        shade = np.clip(lb / max(np.median(lb[band]), 1e-3), 0.3, 2.0)[..., None]
-        col = col * shade
-        top = band & ((geo.hgt > hp - rng.uniform(0.003, 0.008)) | ~np.roll(band, 1, axis=0))
-        col[top] *= edge_gain
-        col[band & (geo.hgt < 0.004)] *= 0.6             # joint / shadow line at the floor
+        elif style == "wood":  # wood grain running along the board (texture rows = height, columns = along)
+            tex, size = strip_texture(rng, ("wood",))
+            ppm = 1024 / size
+            col = cv2.remap(tex.astype(np.float32) / 255, ((geo.hgt + rng.uniform(0, 1)) * ppm).astype(np.float32),
+                            (s * ppm).astype(np.float32), cv2.INTER_LINEAR, borderMode=cv2.BORDER_WRAP)
+        else:
+            if style == "wall":   # painted to blend with the wall: the wall's colour just above, a shade off
+                above = base & (geo.hgt > hp + 0.02) & (geo.hgt < hp + 0.3)
+                colour = np.median(img[above] if above.sum() > 50 else img[base & ~band], axis=0)
+                colour = colour * rng.uniform(0.85, 1.12)
+            elif style == "white":
+                colour = np.array([rng.uniform(0.82, 0.95)] * 3) * [rng.uniform(0.96, 1.0), 1.0, rng.uniform(0.96, 1.0)]
+            else:                 # grey / black / dark brown
+                colour = np.array(rng.choice([(0.55, 0.55, 0.55), (0.1, 0.1, 0.1), (0.15, 0.22, 0.3)]))
+            # raw wall pixels already carry the light: no extra shading on a colour taken from them
+            col = np.asarray(colour, np.float32) * (1 + 0.02 * g.normal(0, 1, (H, W, 1))).astype(np.float32)
+        if style != "wall":
+            col = col * self.wall_shade(img, band)
+        e = rng.uniform(0.003, 0.008)                    # visible depth of the board's top, m (1 cm, foreshortened)
+        top = band & ((geo.hgt > hp - e) | ~np.roll(band, 1, axis=0))
+        col[top] *= rng.uniform(1.15, 1.35)              # lit top edge
+        col[band & (geo.hgt < 0.004)] *= 0.6             # contact line at the floor
         img[band] = col[band]
+        joint = base & ~band & (geo.hgt > hp) & (geo.hgt < hp + rng.uniform(0.002, 0.005))
+        img[joint] *= rng.uniform(0.6, 0.8)              # shadow / caulk line where the board meets the wall
         lab[band] = 0                                    # already obstacle (wall pixels): explicit
-        return {"h": hp, "plain": patch is None, "px": int(band.sum())}
+        return {"h": hp, "style": style, "px": int(band.sum())}
+
+    def wall_tiles(self, img, lab, geo, rng):
+        """Tiled wall base (bathroom, kitchen): procedural tiles unlike the floor's, from the floor up to a random
+        height on the wall bases in view, in metres; a dark grout line at the floor. Labelled obstacle."""
+        c = self.cfg
+        ht = rng.uniform(*c.wall_tile_h)
+        base, run = self.wall_base(lab, geo)
+        band = base & (geo.hgt <= ht) & (geo.hgt > -0.02)
+        if band.sum() < 200:
+            return None
+        s = self.along_wall(band, run, geo, rng)
+        tex, size = procedural_tiles(rng)
+        ppm = 1024 / size
+        col = cv2.remap(tex.astype(np.float32) / 255, (s * ppm).astype(np.float32),
+                        ((ht - geo.hgt) * ppm + rng.uniform(0, 1024)).astype(np.float32), cv2.INTER_LINEAR,
+                        borderMode=cv2.BORDER_WRAP)
+        col = col * self.wall_shade(img, band) * rng.uniform(0.7, 1.0)   # vertical face: less light
+        col[band & (geo.hgt < 0.004)] *= 0.6
+        img[band] = col[band]
+        lab[band] = 0
+        return {"h": ht, "px": int(band.sum())}
 
     # ---------------------------------------------------------------- threshold strip / level change
     def edge(self, geo, ys, xs, rng):
@@ -395,6 +470,7 @@ class StructAug:
             return None
         flat = rng.random() < c.p_level_flat
         up = rng.random() < c.p_level_up
+        other = rng.random() < (c.p_flat_other if flat else c.p_level_other)  # other flooring beyond the edge
         dz = rng.uniform(0.002, c.flat_dz) if flat else rng.uniform(*c.level_dz)
         dz = dz if up else -dz
         # Room-wide edges only: a door-wide one, with no door jambs beside it in the render, comes out as a
@@ -431,7 +507,6 @@ class StructAug:
         # floor beyond the edge: reprojection of the original floor, or another flooring
         patch = self.floor_patch(img0, free, geo, rng)
         col, okf, oke = self.reproject(img0, lab0, geo, gx[top], gz[top], None if up else ve, None if up else nrm)
-        other = rng.random() < c.p_level_other
         use = oke | (okf & (not other))   # extruded walls / objects always; reprojected floor unless other flooring
         if not use.all():   # other flooring / fallback, sampled at the metric (along, across) coordinates
             if other:

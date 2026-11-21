@@ -17,10 +17,11 @@ precision, recall) are reported but best.pt is still chosen on floor IoU.
     python -m floor_seg.train --data data/synth/thor_v3 --out models/floor_v5_under --tex data/textures/ambientcg --under
     # several folders are mixed (thor_v1 views have no _under.png: they train the floor output only)
     python -m floor_seg.train --data data/synth/thor_v1 data/synth/thor_v3 --out models/floor_v6_mix --tex data/textures/ambientcg --under
---aug-structures (off by default): after the retexturing, paint tiled plinths on wall bases (obstacle), flush
-threshold strips (floor), level changes (floor beyond an edge raised / lowered: >= 2 cm obstacle, <= 1 cm floor) and
-sun streaks / specular highlights (floor), placed in metres with the same depth + pose
-(floor_seg/aug_structures.py); --aug-p-* set their probabilities.
+--aug-structures (off by default): after the retexturing, paint skirting boards or tiles on wall bases (obstacle),
+flush threshold strips (floor), level changes (floor beyond an edge: a 10-20 cm step -> obstacle, or a flat
+flooring change <= 1 cm -> floor) and, if their probabilities are set, sun streaks / specular highlights (floor),
+placed in metres with the same depth + pose (floor_seg/aug_structures.py); --aug-p-* set their probabilities
+(0 turns one off).
 Saves best.pt (by floor IoU), last.pt, floor.onnx (fp32, from best) and metrics.jsonl.
 """
 import argparse
@@ -190,7 +191,7 @@ def struct_aug(args):
     if not args.aug_structures:
         return None
     cfg = StructAugCfg(p_plinth=args.aug_p_plinth, p_threshold=args.aug_p_threshold, p_level=args.aug_p_level,
-                       p_sun=args.aug_p_sun, p_specular=args.aug_p_specular)
+                       p_sun=args.aug_p_sun, p_specular=args.aug_p_specular, p_wall_tiles=args.aug_p_wall_tiles)
     return StructAug(cfg, args.calib)
 
 
@@ -210,9 +211,10 @@ def build_parser():
     ap.add_argument("--backbone", choices=["small", "large"], default="small", help="MobileNetV3 size (model.FloorNet)")
     d = StructAugCfg()
     ap.add_argument("--aug-structures", action="store_true",
-                    help="plinths, threshold strips, level changes, sun streaks and highlights "
-                         "(floor_seg/aug_structures.py)")
+                    help="plinths / wall tiles, threshold strips, level changes (sun streaks and highlights: off "
+                         "unless --aug-p-sun / --aug-p-specular) (floor_seg/aug_structures.py)")
     ap.add_argument("--aug-p-plinth", type=float, default=d.p_plinth, help="with --aug-structures")
+    ap.add_argument("--aug-p-wall-tiles", type=float, default=d.p_wall_tiles, help="tiled wall base, instead of a plinth")
     ap.add_argument("--aug-p-threshold", type=float, default=d.p_threshold, help="with --aug-structures")
     ap.add_argument("--aug-p-level", type=float, default=d.p_level, help="step up / down beyond an edge")
     ap.add_argument("--aug-p-sun", type=float, default=d.p_sun, help="with --aug-structures")

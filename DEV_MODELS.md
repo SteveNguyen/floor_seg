@@ -66,15 +66,52 @@ python -m floor_seg.train --data data/synth/thor_v1 data/synth/thor_v3 --kinds f
     --out models/floor_v7_floor_under --tex data/textures/ambientcg --under
 ```
 
-## Training command (v8, in training): v7 + structure augmentations
+## v8 (`floor_v8_struct`, local only): v7 + structure augmentations, worse than v7
 
-Same recipe plus `--aug-structures` ([floor_seg/aug_structures.py](floor_seg/aug_structures.py)): tiled plinths on
-wall bases (obstacle), flush threshold strips (floor), level changes (the floor beyond an edge 2-18 cm higher or
-lower: riser and floor beyond obstacle; 20 % of them within 1 cm: floor) and sun streaks / specular highlights
-(floor), for real failures: tiled plinths called floor, doorsteps called obstacle, sunlit shiny tiles called
-obstacle. Default probabilities (plinth 0.3, threshold 0.3, level 0.3, sun 0.25, specular 0.2). Preview: `python -m floor_seg.aug_preview --data data/synth/thor_v3 --n 6 --out p.jpg`.
+v7 recipe plus `--aug-structures` with the augmentation defaults of the time (commit `a44ccd3`): plinths on wall
+bases (70 % the floor's own tiles, 5-12 cm, obstacle), flush threshold strips (floor), level changes (the floor
+beyond an edge 2-18 cm higher or lower: obstacle; 20 % within 1 cm: floor), sun streaks / specular highlights
+(floor). Probabilities plinth 0.3, threshold 0.3, level 0.3, sun 0.25, specular 0.2. Synthetic val floor IoU 0.9365.
+
+Real test set (75 frames, cutoff 0.5), v7 -> v8, floor IoU (false floor / missed floor):
+
+| Group (frames) | v7 | v8 |
+|---|---|---|
+| all (75) | 0.946 (2.7 / 2.9 %) | 0.930 (3.2 / 4.1 %) |
+| doorstep (7) | 0.932 (1.8 / 5.0 %) | **0.955** (1.8 / 2.7 %) |
+| blocked (5) | 0.931 (1.0 / 5.7 %) | **0.957** (1.7 / 2.2 %) |
+| doorstep_rough (3) | 0.869 (0.5 / 12.7 %) | 0.749 (0.3 / 24.8 %) |
+| plinth (3) | 0.743 (14.2 / 3.3 %) | 0.713 (16.1 / 4.3 %) |
+| ordinary (15) | 0.973 (2.2 / 0.9 %) | 0.954 (3.8 / 1.5 %) |
+| passage (26) | 0.962 (2.3 / 1.8 %) | 0.951 (2.6 / 2.7 %) |
+
+Lessons (side-by-side images of the frames that changed most):
+- **Threshold strips work**: doorsteps v7 refused are accepted (missed floor 2-6x lower on those frames).
+- **Small level changes taught a shortcut.** A 2-8 cm step is hardly visible in one image from 0.3 m high, so
+  the model learned "another flooring past a line across the floor = obstacle" and refused flat doorways
+  (terracotta beyond a white-tile threshold: IoU 0.97 -> 0.46). Real homes have drivable doorsteps or real steps,
+  hardly anything in between.
+- **Sun / specular** most likely taught "bright, washed-out = floor": v8 calls white plinths and wall bases floor.
+- **The plinth augmentation did not match real plinths** (mostly painted white or wall-coloured boards 8-20 cm,
+  rarely tiles): no gain on real plinths.
+
+## v9 (planned): two ablation runs
+
+Augmentations revised after v8 (current defaults of [floor_seg/aug_structures.py](floor_seg/aug_structures.py)):
+real steps only (10-20 cm, obstacle); flat flooring changes (<= 1 cm, floor) as frequent as steps and 70 % with
+another flooring beyond; threshold strips unchanged; sun / specular off; plinths on 60 % of images, 8-20 cm, styles
+wall colour 40 %, white 30 %, wood 15 %, floor tiles 10 %, grey / black 5 %, with a lit top edge, a joint line
+on the wall and a contact line; tiled wall bases (bathroom) 10 %, instead of a plinth.
+Preview: `python -m floor_seg.aug_preview --data data/synth/thor_v3 --n 6 --out p.jpg` (one column per
+augmentation), or one training configuration: `--n 12 --all-only --set p_plinth=0 p_wall_tiles=0`.
+
+- **v9a**: v7 + threshold strips + the new level changes (no plinth, no wall tiles).
+- **v9b**: v9a + the new plinths and wall tiles. v9a vs v9b isolates the plinth effect.
 
 ```bash
 python -m floor_seg.train --data data/synth/thor_v1 data/synth/thor_v3 --kinds floor \
-    --out models/floor_v8_struct --tex data/textures/ambientcg --under --aug-structures
+    --out models/floor_v9a_steps --tex data/textures/ambientcg --under --aug-structures \
+    --aug-p-plinth 0 --aug-p-wall-tiles 0
+python -m floor_seg.train --data data/synth/thor_v1 data/synth/thor_v3 --kinds floor \
+    --out models/floor_v9b_plinth --tex data/textures/ambientcg --under --aug-structures
 ```
