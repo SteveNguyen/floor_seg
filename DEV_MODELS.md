@@ -95,7 +95,7 @@ Lessons (side-by-side images of the frames that changed most):
 - **The plinth augmentation did not match real plinths** (mostly painted white or wall-coloured boards 8-20 cm,
   rarely tiles): no gain on real plinths.
 
-## v9a (training): steps and door-wide thresholds only
+## v9a (`floor_v9a_steps`, local only): steps and door-wide thresholds only, worse than v7
 
 Augmentations revised after v8 (current defaults of [floor_seg/aug_structures.py](floor_seg/aug_structures.py)):
 real steps only (10-20 cm, obstacle) in 5 % of views; flat flooring changes (<= 1 cm, floor) 3x as often, 70 %
@@ -110,3 +110,21 @@ Preview: `python -m floor_seg.aug_preview --data data/synth/thor_v3 --n 12 --all
 python -m floor_seg.train --data data/synth/thor_v1 data/synth/thor_v3 --kinds floor \
     --out models/floor_v9a_steps --tex data/textures/ambientcg --under --aug-structures
 ```
+
+Synthetic val floor IoU 0.9430 (not comparable with v8: other augmentations in val). Real test set, cutoff 0.5:
+
+| Group (frames) | v7 | v9a |
+|---|---|---|
+| all (75) | **0.946** (2.7 / 2.9 %) | 0.921 (3.5 / 4.7 %) |
+| doorstep (7) | 0.932 (1.8 / 5.0 %) | **0.945** (2.1 / 3.4 %) |
+| blocked (5) | 0.931 (1.0 / 5.7 %) | **0.955** (2.4 / 1.7 %) |
+| doorstep_rough (3) | 0.869 (0.5 / 12.7 %) | **0.918** (1.1 / 7.0 %) |
+| plinth (3) | **0.743** (14.2 / 3.3 %) | 0.677 (20.3 / 3.2 %) |
+| ordinary (15) | **0.973** (2.2 / 0.9 %) | 0.965 (2.9 / 1.2 %) |
+| passage (26) | **0.962** (2.3 / 1.8 %) | 0.904 (2.6 / 7.5 %) |
+
+19 frames worse by > 0.02 IoU, 7 better. Doorsteps and door frames improve (no longer refused). The loss is one dim,
+motion-blurred tiled hallway (5 frames of one run): v9a calls large patches of the plain far floor non-floor
+(IoU 0.99 -> 0.37); v8 did not fail there, so the cause is not isolated (candidates: frequent flooring changes,
+steps whose lower floor keeps the same texture, or run-to-run variance). Plinths get worse with no plinth
+augmentation (floor-matching tiled plinths read as floor).
