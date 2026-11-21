@@ -110,3 +110,20 @@ Preview: `python -m floor_seg.aug_preview --data data/synth/thor_v3 --n 12 --all
 python -m floor_seg.train --data data/synth/thor_v1 data/synth/thor_v3 --kinds floor \
     --out models/floor_v9a_steps --tex data/textures/ambientcg --under --aug-structures
 ```
+
+## v9b (planned): rendered plinths and real doorways
+
+thor_v4 = the thor_v3 houses and cameras (same seed) rendered with `thor_render --plinths`: a 1 cm board, 8-20 cm
+high (one height per house), along every room wall, cut at the doors, labelled obstacle by the floor rule;
+`<name>_plinth.png` its pixels; stats.jsonl `doorways` (door floor segments in view). Training recolours the
+board on its rendered shading (style mix: wall colour 40 %, white 30 %, wood 15 %, the retextured floor's tiles
+10 %, grey / black 5 %; lit top edge, joint, contact line) and puts the threshold strips in real doorways
+(`--aug-p-door-threshold`, 0.5), never on open floor. thor_v1 has no plinths: about half the views without.
+v9a's steps, flat flooring changes, no sun / specular, no painted plinths. Validation (unaugmented) keeps the
+rendered boards neutral grey.
+
+```bash
+python -m floor_seg.thor_render --out data/synth/thor_v4 --houses 2000 --views 5 --plinths   # AI2-THOR env
+python -m floor_seg.train --data data/synth/thor_v1 data/synth/thor_v4 --kinds floor \
+    --out models/floor_v9b_plinth --tex data/textures/ambientcg --under --aug-structures
+```

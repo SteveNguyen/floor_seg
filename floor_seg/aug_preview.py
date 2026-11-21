@@ -24,9 +24,13 @@ import numpy as np
 from floor_seg import DEFAULT_CALIB
 from floor_seg.aug_structures import UNDER, StructAug, StructAugCfg
 
-OFF = dict(p_plinth=0.0, p_threshold=0.0, p_level=0.0, p_sun=0.0, p_specular=0.0, p_wall_tiles=0.0)
-COLUMNS = [("original", OFF), ("plinth", dict(OFF, p_plinth=1.0)), ("wall tiles", dict(OFF, p_wall_tiles=1.0)),
-           ("flush threshold", dict(OFF, p_threshold=1.0)),
+OFF = dict(p_plinth=0.0, p_threshold=0.0, p_level=0.0, p_sun=0.0, p_specular=0.0, p_wall_tiles=0.0,
+           p_plinth_render=0.0, p_door_threshold=0.0)
+# plinth: the rendered one recoloured where the render has one (_plinth.png), else painted; threshold: in a real
+# doorway where the render lists them, else on open floor
+COLUMNS = [("original", OFF), ("plinth", dict(OFF, p_plinth=1.0, p_plinth_render=1.0)),
+           ("wall tiles", dict(OFF, p_wall_tiles=1.0)),
+           ("flush threshold", dict(OFF, p_threshold=1.0, p_door_threshold=1.0)),
            ("level up", dict(OFF, p_level=1.0, p_level_up=1.0, p_level_flat=0.0)),
            ("level down", dict(OFF, p_level=1.0, p_level_up=0.0, p_level_flat=0.0)),
            ("level +-1 cm", dict(OFF, p_level=1.0, p_level_flat=1.0)),
@@ -83,20 +87,25 @@ def main():
         if os.path.exists(base + "_under.png"):
             lab0[(cv2.imread(base + "_under.png", 0) > 127) & (floor > 0)] = UNDER
         depth = cv2.imread(base + "_depth.png", cv2.IMREAD_UNCHANGED)
+        plinth = cv2.imread(base + "_plinth.png", 0) if os.path.exists(base + "_plinth.png") else None
+        src = img0.copy()   # before retexturing: the rendered plinth's own light
         if ftex is not None:
             img0 = ftex.apply(img0, floor, depth, s["pitch"], s["roll"], random.Random(k), cam_h=s["h"])
         cells = []
         for (title, kw), sa in zip(columns, augs):
-            img, lab, info = sa.apply(img0, lab0, depth, s["pitch"], s["roll"], s["h"], random.Random(1000 * args.seed + k))
+            img, lab, info = sa.apply(img0, lab0, depth, s["pitch"], s["roll"], s["h"], random.Random(1000 * args.seed + k),
+                                      plinth=plinth, plinth_src=src, doorways=s.get("doorways"))
             cell = np.vstack([img, label_view(img, lab)])
             painted = {key: v for key, v in info.items() if v}
             text = title if (kw is over or kw is OFF or painted) else f"{title}: n/a"
             if "plinth" in painted:
-                text += f" {painted['plinth']['h'] * 100:.0f} cm {painted['plinth']['style']}"
+                text += f" {painted['plinth']['h'] * 100:.0f} cm {painted['plinth']['style']}" + \
+                    (" rendered" if painted["plinth"].get("rendered") else "")
             if "wall_tiles" in painted:
                 text += f" tiles {painted['wall_tiles']['h']:.1f} m"
             if "threshold" in painted:
-                text += f" {painted['threshold']['h'] * 100:.1f} cm"
+                text += f" {painted['threshold']['h'] * 100:.1f} cm" + \
+                    (" doorway" if painted["threshold"].get("doorway") else "")
             if "level" in painted:
                 lv = painted["level"]
                 text += f" {lv['dz'] * 100:+.1f} cm" + (" door" if lv["door"] else "") + (" other" if lv["other"] else "")

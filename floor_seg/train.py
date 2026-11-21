@@ -21,7 +21,13 @@ precision, recall) are reported but best.pt is still chosen on floor IoU.
 flush threshold strips (floor), level changes (floor beyond an edge: a 10-20 cm step -> obstacle, or a flat
 flooring change <= 1 cm -> floor) and, if their probabilities are set, sun streaks / specular highlights (floor),
 placed in metres with the same depth + pose (floor_seg/aug_structures.py); --aug-p-* set their probabilities
-(0 turns one off).
+(0 turns one off). Render sets made with thor_render --plinths (thor_v4) have real plinths along the walls,
+recoloured in the same styles (_plinth.png), and list the doorways in view: there the threshold strips go in
+real doorways only. Validation is never augmented (its rendered plinths stay neutral grey).
+
+    # v9b: thor_v1 (no plinths) + thor_v4 (rendered plinths, doorways)
+    python -m floor_seg.train --data data/synth/thor_v1 data/synth/thor_v4 --kinds floor \\
+        --out models/floor_v9b_plinth --tex data/textures/ambientcg --under --aug-structures
 Saves best.pt (by floor IoU), last.pt, floor.onnx (fp32, from best) and metrics.jsonl.
 """
 import argparse
@@ -69,12 +75,14 @@ def seg_loss(logits, lab, w_under=1.0):
 
 
 class Renders(Dataset):
-    def __init__(self, root, names, train, poses=None, ftex=None, under=False, saug=None):
+    def __init__(self, root, names, train, poses=None, ftex=None, under=False, saug=None, doorways=None):
         """poses: name -> (pitch deg, roll deg, camera height m); ftex: FloorTex for floor retexturing (train only,
         needs poses); under: also read <name>_under.png (labels: encode_labels); saug: StructAug (train only,
-        needs poses), None = off."""
+        needs poses), None = off; doorways: name -> the view's stats.jsonl 'doorways' (None when the render set
+        does not list them). With saug, a <name>_plinth.png (thor_render --plinths) is recoloured by it."""
         self.root, self.names, self.train = root, names, train
         self.poses, self.ftex, self.under, self.saug = poses, ftex, under, saug
+        self.doorways = doorways or {}
 
     def __len__(self):
         return len(self.names)
@@ -131,10 +139,14 @@ class Renders(Dataset):
             if self.ftex is not None or self.saug is not None:  # first, while pixels match the stored depth / pose
                 depth = cv2.imread(base + "_depth.png", cv2.IMREAD_UNCHANGED)
                 pitch, roll, h = self.poses[self.names[i]]
+            plinth, src = None, None
+            if self.saug is not None and os.path.exists(base + "_plinth.png"):   # rendered plinths (thor_v4)
+                plinth, src = cv2.imread(base + "_plinth.png", 0), img.copy()   # the board's light, before retexturing
             if self.ftex is not None:
                 img = self.ftex.apply(img, floor, depth, pitch, roll, rng, cam_h=h)
             if self.saug is not None:  # after the retexturing: plinths copy the (new) floor texture
-                img, mask, _ = self.saug.apply(img, mask, depth, pitch, roll, h, rng)
+                img, mask, _ = self.saug.apply(img, mask, depth, pitch, roll, h, rng, plinth=plinth, plinth_src=src,
+                                               doorways=self.doorways.get(self.names[i]))
             img, mask = self.augment(img, mask, rng)
         img = cv2.resize(img, (IN_W, IN_H), interpolation=cv2.INTER_AREA)[:, :, ::-1].astype(np.float32) / 255
         mask = cv2.resize(mask, (IN_W, IN_H), interpolation=cv2.INTER_NEAREST)
@@ -153,8 +165,9 @@ def datasets(roots, under=False, kinds=None, ftex=None, saug=None):
         if kinds:
             stats = [s for s in stats if s.get("kind", "floor") in kinds]
         poses = {s["name"]: (s["pitch"], s["roll"], s["h"]) for s in stats}
+        doorways = {s["name"]: s.get("doorways") for s in stats}   # None: the set does not list them (thor_v1 / v3)
         tr.append(Renders(root, [s["name"] for s in stats if s["house"] % 10 != 0], True, poses, ftex, under=under,
-                          saug=saug))
+                          saug=saug, doorways=doorways))
         va.append(Renders(root, [s["name"] for s in stats if s["house"] % 10 == 0], False, under=under))
     return ConcatDataset(tr), ConcatDataset(va)
 
@@ -191,7 +204,8 @@ def struct_aug(args):
     if not args.aug_structures:
         return None
     cfg = StructAugCfg(p_plinth=args.aug_p_plinth, p_threshold=args.aug_p_threshold, p_level=args.aug_p_level,
-                       p_sun=args.aug_p_sun, p_specular=args.aug_p_specular, p_wall_tiles=args.aug_p_wall_tiles)
+                       p_sun=args.aug_p_sun, p_specular=args.aug_p_specular, p_wall_tiles=args.aug_p_wall_tiles,
+                       p_plinth_render=args.aug_p_plinth_render, p_door_threshold=args.aug_p_door_threshold)
     return StructAug(cfg, args.calib)
 
 
@@ -215,7 +229,11 @@ def build_parser():
                          "unless --aug-p-sun / --aug-p-specular) (floor_seg/aug_structures.py)")
     ap.add_argument("--aug-p-plinth", type=float, default=d.p_plinth, help="with --aug-structures")
     ap.add_argument("--aug-p-wall-tiles", type=float, default=d.p_wall_tiles, help="tiled wall base, instead of a plinth")
+    ap.add_argument("--aug-p-plinth-render", type=float, default=d.p_plinth_render,
+                    help="recolour the rendered plinths (thor_render --plinths sets: _plinth.png)")
     ap.add_argument("--aug-p-threshold", type=float, default=d.p_threshold, help="with --aug-structures")
+    ap.add_argument("--aug-p-door-threshold", type=float, default=d.p_door_threshold,
+                    help="threshold strip in a real doorway (sets that list doorways), instead of --aug-p-threshold")
     ap.add_argument("--aug-p-level", type=float, default=d.p_level, help="step up / down beyond an edge")
     ap.add_argument("--aug-p-sun", type=float, default=d.p_sun, help="with --aug-structures")
     ap.add_argument("--aug-p-specular", type=float, default=d.p_specular, help="with --aug-structures")
