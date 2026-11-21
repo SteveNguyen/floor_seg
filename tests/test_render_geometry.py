@@ -3,7 +3,8 @@ import itertools
 
 import numpy as np
 
-from floor_seg.thor_render import UndersideMap, height_above_floor, support_tops, world_xz
+from floor_seg.thor_render import (PLINTH_D, PLINTH_DOOR_M, PLINTH_TAG, UndersideMap, door_segments,
+                                   doorways_in_view, height_above_floor, plinth_walls, support_tops, world_xz)
 
 
 def box(otype, x, z, y):
@@ -135,3 +136,48 @@ def test_support_tops_only_large_ones():
     assert [o["objectType"] for o, *_ in tops] == ["DiningTable"]
     o, top, c0, e1, e2 = tops[0]
     assert abs(top - 0.76) < 1e-9 and np.allclose(c0, [0, 0]) and np.allclose(e1 + e2, [1.2, 0.8])
+
+
+def square_house():
+    """ProcTHOR-like house: one 4 x 4 m room (x, z in 0..4), its 4 walls, the exterior face of the z = 0 wall,
+    and a door 1.0-2.0 m along that wall (hole x measured from the wall polygon's first point)."""
+    def wall(wid, room, a, b):
+        return {"id": wid, "roomId": room, "material": {"name": "PureWhite"},
+                "polygon": [{"x": a[0], "y": 0, "z": a[1]}, {"x": b[0], "y": 0, "z": b[1]},
+                            {"x": a[0], "y": 2.5, "z": a[1]}, {"x": b[0], "y": 2.5, "z": b[1]}]}
+    corners = [(0, 0), (4, 0), (4, 4), (0, 4)]
+    walls = [wall(f"wall|1|{a}|{b}", "room|1", a, b) for a, b in zip(corners, corners[1:] + corners[:1])]
+    walls.append(wall("wall|exterior|0|0|4|0", "exterior", (0, 0), (4, 0)))
+    door = {"id": "door|1", "wall0": walls[0]["id"], "wall1": "wall|exterior|0|0|4|0", "assetId": "Doorway_1",
+            "holePolygon": [{"x": 1.0, "y": 0, "z": 0}, {"x": 2.0, "y": 2.1, "z": 0}]}
+    room = {"id": "room|1", "floorPolygon": [{"x": x, "y": 0, "z": z} for x, z in corners]}
+    return {"rooms": [room], "walls": walls, "doors": [door], "windows": [], "objects": []}
+
+
+def test_plinths_follow_room_walls_inside_and_skip_doors():
+    house = square_house()
+    assert door_segments(house) == [((1.0, 0.0), (2.0, 0.0))]
+    pl = plinth_walls(house, 0.12)
+    assert all(PLINTH_TAG in w["id"] and w["roomId"] == "room|1" for w in pl)
+    assert not any(w["id"].startswith("wall|exterior") for w in pl)   # no plinth on the outside face
+    # the door wall is cut in two (door + casing), the three others are whole: 5 boards
+    assert len(pl) == 5
+    for w in pl:
+        ys = sorted(p["y"] for p in w["polygon"])
+        assert ys == [0.0, 0.0, 0.12, 0.12]
+    door_wall = [w for w in pl if w["id"].startswith("wall|1|(0, 0)")]
+    spans = sorted((min(p["x"] for p in w["polygon"]), max(p["x"] for p in w["polygon"])) for w in door_wall)
+    assert np.allclose(spans, [(0.0, 1.0 - PLINTH_DOOR_M), (2.0 + PLINTH_DOOR_M, 4.0)])
+    # PLINTH_D in front of the wall, into the room (z = 0 wall: +z; x = 4 wall: -x)
+    assert all(abs(p["z"] - PLINTH_D) < 1e-9 for w in door_wall for p in w["polygon"])
+    east = [w for w in pl if w["id"].startswith("wall|1|(4, 0)")]
+    assert all(abs(p["x"] - (4 - PLINTH_D)) < 1e-9 for w in east for p in w["polygon"])
+
+
+def test_doorways_in_the_camera_yaw_frame():
+    seg = [((-0.5, 2.0), (0.5, 2.0))]
+    # yaw 0 looks along +z: the doorway is 2 m ahead, from 0.5 m left to 0.5 m right
+    assert doorways_in_view(seg, 0.0, 0.0, 0.0) == [[-0.5, 2.0, 0.5, 2.0]]
+    # yaw 90 looks along +x, right is -z (world_xz): a doorway 2 m along +x, across z = -0.5 .. 0.5
+    assert doorways_in_view([((2.0, -0.5), (2.0, 0.5))], 0.0, 0.0, 90.0) == [[0.5, 2.0, -0.5, 2.0]]
+    assert doorways_in_view(seg, 0.0, -10.0, 0.0) == []                  # farther than max_d
