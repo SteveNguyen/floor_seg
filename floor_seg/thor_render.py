@@ -35,6 +35,9 @@ Output per view: <name>.jpg (RGB), <name>_floor.png and <name>_under.png (0/255)
 mm, optical z), floor views also <name>_above.png (uint16 mm: height of the lowest surface above each floor
 pixel, for metrics at other clearances; see shoot); one JSON line per view in stats.jsonl (written as it goes; re-running skips houses already
 done). --plans: one top-down QA plan per house (plan_image).
+--plinths: plinths rendered along the room walls (plinth_walls; labelled not floor by the rules above),
+<name>_plinth.png (0/255) their pixels, and in stats.jsonl plinth_h, plinth_frac and doorways (the door
+floor segments near the camera, in its yaw frame) for training-time styling and doorway thresholds.
 """
 import argparse
 import json
@@ -302,7 +305,8 @@ def shoot(ctrl, lens, kind, x, z, support, h, pitch, yaw, roll, um=None, support
     Returns (rgb, floor 0/1, under 0/1, depth_mm, above_mm, info) at the output lens, or None if the view is
     rejected. above_mm (uint16): on floor pixels, height of the lowest surface above (mm, ABOVE_NONE where
     unknown or beyond 65 m); 0 elsewhere. It lets a metric use another clearance than CLEARANCE.
-    info: agree (rule 1 vs 2 IoU), under_frac (share of the floor pixels that are under).
+    info: agree (rule 1 vs 2 IoU), under_frac (share of the floor pixels that are under), and with plinths in
+    the house (--plinths) info["plinth"]: the plinth pixels at the output lens (0/1), popped by the caller.
     """
     map_x, map_y, f, vfov = lens
     ctrl.step("RandomizeLighting", synchronized=False)
@@ -347,7 +351,114 @@ def shoot(ctrl, lens, kind, x, z, support, h, pitch, yaw, roll, um=None, support
     rgb = cv2.remap(rgb_r, map_x, map_y, cv2.INTER_LINEAR)
     depth_mm = cv2.remap(np.clip(depth_r * 1000, 0, 65535).astype(np.uint16), map_x, map_y, cv2.INTER_NEAREST)
     above_mm = cv2.remap(above_r, map_x, map_y, cv2.INTER_NEAREST)
+    plinth_codes = codes(lambda oid: PLINTH_TAG in oid)
+    if plinth_codes:
+        info["plinth"] = cv2.remap(np.isin(seg_code, plinth_codes).astype(np.uint8), map_x, map_y,
+                                   cv2.INTER_NEAREST)
     return rgb, floor, under_lab, depth_mm, above_mm, info
+
+
+# Plinths (--plinths): skirting boards rendered as geometry along the room walls, so they stand where real ones
+# do (walls only: not on doors, cabinets or bins, which a 2D augmentation without a wall mask could not tell
+# apart) with the scene's own lighting, occlusion and contact. Each is an extra wall quad PLINTH_D in front of
+# its wall, as high as the house's plinth height, cut at the door holes (with PLINTH_DOOR_M of casing). Its
+# instance id holds "|plinth|": the floor rule makes it obstacle (it is not a room floor and rises above
+# FLOOR_TOL), the underside map counts it as structure (an id starting with "wall"), and shoot() returns its
+# pixels as a separate mask (<name>_plinth.png) so training can choose the style (wall colour, white, wood,
+# the retextured floor's tiles) on the rendered shading. Neutral light grey: room for recolouring both ways.
+PLINTH_H = (0.08, 0.20)   # m, one height per house
+PLINTH_D = 0.01           # m in front of the wall (a ~1 cm thick board; its top face is not modelled)
+PLINTH_DOOR_M = 0.03      # m kept free on each side of a door hole (the door casing)
+PLINTH_MATERIAL = {"name": "PureWhite", "color": {"r": 0.8, "g": 0.8, "b": 0.8}}
+PLINTH_TAG = "|plinth|"
+
+
+def _in_polygon(x, z, poly):
+    """Even-odd test of the point (x, z) in a polygon of {'x', 'z'} dicts."""
+    inside = False
+    for a, b in zip(poly, poly[1:] + poly[:1]):
+        if (a["z"] > z) != (b["z"] > z) and x < (b["x"] - a["x"]) * (z - a["z"]) / (b["z"] - a["z"]) + a["x"]:
+            inside = not inside
+    return inside
+
+
+def door_segments(house):
+    """World floor segments ((x0, z0), (x1, z1)) of the door holes (doors and doorways; their holes start at
+    the floor), from the hole's x range along its wall0 (measured from the wall polygon's first point)."""
+    walls = {w["id"]: w for w in house["walls"]}
+    out = []
+    for d in house["doors"]:
+        w = walls.get(d["wall0"])
+        if w is None:
+            continue
+        p0, p1 = np.array([w["polygon"][0]["x"], w["polygon"][0]["z"]]), np.array([w["polygon"][1]["x"],
+                                                                                   w["polygon"][1]["z"]])
+        u = (p1 - p0) / max(np.hypot(*(p1 - p0)), 1e-9)
+        a, b = sorted((d["holePolygon"][0]["x"], d["holePolygon"][1]["x"]))
+        out.append((tuple(p0 + a * u), tuple(p0 + b * u)))
+    return out
+
+
+def plinth_walls(house, height):
+    """Plinth quads for every room wall (not exterior faces): the wall's floor line moved PLINTH_D into its
+    room, minus the door holes on that line (+ PLINTH_DOOR_M each side), `height` m high. Returns wall dicts
+    in the house JSON format (ids '<wall id>|plinth|<k>')."""
+    rooms = {r["id"]: r["floorPolygon"] for r in house["rooms"]}
+    doors = door_segments(house)
+    out = []
+    for w in house["walls"]:
+        poly = rooms.get(w.get("roomId"))
+        if poly is None or w["id"].startswith("wall|exterior"):
+            continue
+        p0 = np.array([w["polygon"][0]["x"], w["polygon"][0]["z"]])
+        p1 = np.array([w["polygon"][1]["x"], w["polygon"][1]["z"]])
+        length = np.hypot(*(p1 - p0))
+        if length < 0.05:
+            continue
+        u = (p1 - p0) / length
+        n = np.array([-u[1], u[0]])
+        mid = (p0 + p1) / 2
+        if not _in_polygon(*(mid + 0.05 * n), poly):   # the normal must point into the wall's own room
+            n = -n
+            if not _in_polygon(*(mid + 0.05 * n), poly):
+                continue
+        # free intervals along the wall: [0, length] minus the door holes lying on this wall's line
+        cuts = []
+        for q0, q1 in doors:
+            t0, t1 = (np.dot(np.array(q) - p0, u) for q in (q0, q1))
+            off = max(abs(u[0] * (q[1] - p0[1]) - u[1] * (q[0] - p0[0])) for q in (q0, q1))  # distance to the line
+            if off < 0.02:
+                cuts.append((min(t0, t1) - PLINTH_DOOR_M, max(t0, t1) + PLINTH_DOOR_M))
+        spans, t = [], 0.0
+        for a, b in sorted(cuts):
+            if a > t:
+                spans.append((t, min(a, length)))
+            t = max(t, b)
+        if t < length:
+            spans.append((t, length))
+        for k, (a, b) in enumerate(s for s in spans if s[1] - s[0] >= 0.05):
+            s0, s1 = p0 + a * u + PLINTH_D * n, p0 + b * u + PLINTH_D * n
+            pts = [(s0, 0.0), (s1, 0.0), (s0, height), (s1, height)]   # same corner order as ProcTHOR walls
+            out.append({"id": f"{w['id']}{PLINTH_TAG}{k}", "roomId": w["roomId"],
+                        "polygon": [{"x": float(p[0]), "y": float(y), "z": float(p[1])} for p, y in pts],
+                        "material": dict(PLINTH_MATERIAL), "color": dict(PLINTH_MATERIAL["color"])})
+    return out
+
+
+def doorways_in_view(segments, x, z, yaw, max_d=4.0):
+    """Door floor segments in the camera's yaw frame (gx right, gz forward, m; same frame as world_xz), those
+    with a point within max_d of the camera: [[gx0, gz0, gx1, gz1], ...]. For training-time thresholds placed
+    in the real doorways."""
+    w = math.radians(yaw)
+    out = []
+    for (x0, z0), (x1, z1) in segments:
+        pts = []
+        for px, pz in ((x0, z0), (x1, z1)):
+            dx, dz = px - x, pz - z
+            pts += [dx * math.cos(w) - dz * math.sin(w), dx * math.sin(w) + dz * math.cos(w)]
+        if min(math.hypot(pts[0], pts[1]), math.hypot(pts[2], pts[3])) <= max_d:
+            out.append([round(v, 3) for v in pts])
+    return out
 
 
 def add_clutter(house, reach, by_type, rng):
@@ -403,6 +514,9 @@ def main():
                     help="render only houses I, I+N, I+2N... of the list (N processes or machines in parallel, "
                          "same --out; stats go to stats_s<I>.jsonl, merge with: cat stats_s*.jsonl > stats.jsonl)")
     ap.add_argument("--only", type=int, nargs="+", help="render only these house indices (QA), instead of the list")
+    ap.add_argument("--plinths", action="store_true",
+                    help="add plinths along the room walls (plinth_walls), write <name>_plinth.png, and the door "
+                         "floor segments of each view in stats.jsonl ('doorways', camera yaw frame)")
     args = ap.parse_args()
     os.makedirs(args.out, exist_ok=True)
     si, sn = args.shard
@@ -436,6 +550,11 @@ def main():
             if len(reach) < 10:
                 continue
             house, placed = add_clutter(houses[hi], list(reach), by_type, rng)
+            doors = []
+            if args.plinths:  # own random stream: the clutter and the camera draws stay those of a run without
+                plinth_h = random.Random(args.seed * 100003 + hi + 7919).uniform(*PLINTH_H)
+                house["walls"] += plinth_walls(house, plinth_h)
+                doors = door_segments(house)
             ctrl.reset(scene=house)
             house, moved = rest_on_floor(house, ctrl.last_event.metadata["objects"])
             if moved:
@@ -463,6 +582,12 @@ def main():
         def save(kind, k, view, x, z, support, h, pitch, yaw, roll):
             rgb, floor, under, depth_mm, above_mm, info = view
             name = f"h{hi:05d}_{k}" if kind == "floor" else f"h{hi:05d}_t{k}"
+            if args.plinths:
+                plinth = info.pop("plinth", np.zeros_like(floor))
+                cv2.imwrite(os.path.join(args.out, name + "_plinth.png"), plinth * 255)
+                info["plinth_frac"] = float(plinth.mean())
+                info["plinth_h"] = round(plinth_h, 3)
+                info["doorways"] = doorways_in_view(doors, x, z, yaw) if kind == "floor" else []
             if kind == "floor":
                 shots.append((name[-1], x, z, yaw))
             cv2.imwrite(os.path.join(args.out, name + ".jpg"), rgb[:, :, ::-1], [cv2.IMWRITE_JPEG_QUALITY, 92])

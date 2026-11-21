@@ -20,13 +20,19 @@ in the camera-yaw frame is (gx right, gz forward, height above the floor), all l
              along the wall in metres: same tiles, same scale), or plain grey / black. The board stands ~1 cm
              proud of the wall: lit top edge, dark joint line on the wall above it, dark contact line at the floor.
              Label: obstacle (it was a wall pixel already: no label changes).
+             The wall-base detector cannot tell walls from doors, cabinets or bins (no wall mask in the renders),
+             so this painted plinth is off by default. Renders made with thor_render --plinths have real boards
+             along the room walls only (<name>_plinth.png): plinth_render recolours them with the same styles on
+             the rendered shading (light = render / PLINTH_ALBEDO), and the painted plinth is never used there.
   wall tiles same wall bases, tiled (bathroom, kitchen) from the floor up to wall_tile_h with procedural tiles
              unlike the floor's; instead of a plinth. Label: obstacle (unchanged).
   threshold  a strip of another material (wood, metal, stone, tile, dark vinyl), thr_width deep, at 0.5-2.5 m
              ahead, roughly across the view (+-thr_angle), door-wide (p_door) or spanning the room (then with
-             p_transition the floor beyond it gets another tiling, as at a room transition). Door openings are
-             not detected (renders store no door geometry); a random placement on visible floor teaches the
-             same appearance cue. The strip is a box ray-traced against every pixel ray with the stored depth
+             p_transition the floor beyond it gets another tiling, as at a room transition). Renders made with
+             thor_render --plinths list the doorways in view (stats.jsonl 'doorways': door floor segments in the
+             camera yaw frame): there the strip lies along a real doorway, its whole width (p_door_threshold), and
+             never on open floor; older renders have no door geometry: a random placement on visible floor
+             (door_len wide). The strip is a box ray-traced against every pixel ray with the stored depth
              as z-buffer; flush / low (flush_h, <= 1.2 cm): keeps the floor label (drivable, label rule).
              (A raised box strip lying on the floor was dropped: it has hardly any real equivalent; the real
              "not drivable" case is a level change, below.)
@@ -78,6 +84,8 @@ from floor_seg import DEFAULT_CALIB
 from floor_seg.floor_tex import H, W, FloorTex, floor_coords, heights, lens_rays, procedural_tiles, pyramid
 
 UNDER = 2  # = floor_seg.train.UNDER (not imported: train imports this module, and pulls in torch)
+# colour of the rendered plinths (thor_render.PLINTH_MATERIAL; not imported: thor_render needs AI2-THOR's env)
+PLINTH_ALBEDO = 0.8
 
 
 @dataclass
@@ -91,6 +99,9 @@ class StructAugCfg:
     plinth_h: tuple = (0.08, 0.20)       # m, plinth height
     # style weights: wall colour (a shade off), white, wood, the floor's own tiles, other plain (grey / black)
     plinth_style: tuple = (0.4, 0.3, 0.15, 0.1, 0.05)
+    # rendered plinths (thor_render --plinths: <name>_plinth.png, a neutral grey board lit by the scene, along the
+    # room walls only): recoloured at training time with the same style mix, on the rendered shading
+    p_plinth_render: float = 1.0
     wall_min_h: float = 0.4              # m, a vertical surface rising this high (or out of the image) is a wall
     contact_h: float = 0.03              # m, a non-floor pixel this close to the floor touches it
     # tiled wall base (bathroom, kitchen): tiles unlike the floor's up to wall_tile_h (labelled obstacle); a wall
@@ -99,6 +110,9 @@ class StructAugCfg:
     wall_tile_h: tuple = (0.5, 2.0)      # m (above the image top: the whole visible wall)
     # threshold / doorstep strip across the floor (labelled floor)
     p_threshold: float = 0.3
+    # renders that list the doorways in view (stats.jsonl 'doorways', thor_render --plinths): the strip goes in a
+    # real doorway, with this probability instead of p_threshold, and never on open floor
+    p_door_threshold: float = 0.5
     thr_dist: tuple = (0.5, 2.5)         # m ahead (gz) of a point of the strip / level edge
     thr_width: tuple = (0.03, 0.10)      # m, strip depth on the floor
     thr_angle: float = 25.0              # deg, strip / edge direction around "across the view"
@@ -225,10 +239,13 @@ class StructAug:
         uv[z <= 0.05] = np.nan
         return uv[..., 0], uv[..., 1]
 
-    def apply(self, bgr, label, depth_mm, pitch, roll, cam_h, rng):
+    def apply(self, bgr, label, depth_mm, pitch, roll, cam_h, rng, plinth=None, plinth_src=None, doorways=None):
         """bgr: H x W x 3 uint8 render (after floor_tex if used); label: H x W uint8, 0 = obstacle, any other
-        value floor (train.encode_labels, or 0/1). Returns (bgr, label, info): new arrays only when something was
-        painted; info lists what was painted (preview, tests)."""
+        value floor (train.encode_labels, or 0/1). Renders made with thor_render --plinths also give plinth (their
+        _plinth.png, non-zero = rendered board), plinth_src (the render before floor retexturing, which may paint
+        over the board: its shading is read there; None = bgr) and doorways (stats.jsonl 'doorways'; None = not
+        known, [] = none in view). Returns (bgr, label, info): new arrays only when something was painted; info
+        lists what was painted (preview, tests)."""
         c, info = self.cfg, {}
         geo = Geom(self.xn, self.yn, depth_mm, pitch, roll, cam_h)
         free = geo.valid & (label != 0) & (label != UNDER)   # floor that may be painted
@@ -236,14 +253,19 @@ class StructAug:
             return bgr, label, info
         img, lab = bgr.astype(np.float32) / 255, label.copy()
         # decisions drawn up front: the probability of each augmentation does not depend on the others
-        do = [rng.random() < p for p in (c.p_plinth, c.p_threshold, c.p_level, c.p_sun, c.p_specular,
-                                         c.p_wall_tiles)]
-        if do[5]:     # a tiled wall base has no plinth on top of it
+        p_thr = c.p_threshold if doorways is None else c.p_door_threshold
+        do = [rng.random() < p for p in (c.p_plinth, p_thr, c.p_level, c.p_sun, c.p_specular, c.p_wall_tiles)]
+        rendered = plinth is not None and bool(plinth.any())
+        if rendered:  # the render has its own plinths (walls only): recolour them; no painted plinth / wall tiles
+            if rng.random() < c.p_plinth_render:
+                src = bgr if plinth_src is None else plinth_src
+                info["plinth"] = self.plinth_render(img, lab, geo, plinth > 0, src.astype(np.float32) / 255, rng)
+        elif do[5]:   # a tiled wall base has no plinth on top of it
             info["wall_tiles"] = self.wall_tiles(img, lab, geo, rng)
         elif do[0]:
             info["plinth"] = self.plinth(img, lab, geo, rng)
         if do[1]:
-            info["threshold"] = self.threshold(img, lab, geo, free, rng)
+            info["threshold"] = self.threshold(img, lab, geo, free, rng, doorways)
         if do[2]:
             info["level"] = self.level(img, lab, geo, free, rng)
             free &= lab != 0                                  # floor beyond a step is no longer floor
@@ -325,6 +347,11 @@ class StructAug:
         walls. H x W, constant per column."""
         cols = np.nonzero(band.any(axis=0))[0]
         row0 = run[H - 1 - np.argmax(band[::-1, cols], axis=0), cols]   # contact row of each column's lowest band px
+        return StructAug._arc(cols, row0, geo, rng)
+
+    @staticmethod
+    def _arc(cols, row0, geo, rng):
+        """along_wall's arc length, from the floor-contact pixel (row0) of each band column (cols)."""
         cx, cz = geo.gx[row0, cols], geo.gz[row0, cols]
         step = np.hypot(np.diff(cx), np.diff(cz))
         step = np.where(step > 0.15, rng.uniform(0, 1), step)
@@ -391,6 +418,68 @@ class StructAug:
         img[joint] *= rng.uniform(0.6, 0.8)              # shadow / caulk line where the board meets the wall
         lab[band] = 0                                    # already obstacle (wall pixels): explicit
         return {"h": hp, "style": style, "px": int(band.sum())}
+
+    def plinth_render(self, img, lab, geo, pm, src, rng):
+        """Recolour a rendered plinth (thor_render --plinths; pm: its pixels). The render shows a neutral grey board
+        (PLINTH_ALBEDO) under the scene's light, contact shadows and occlusion; src / PLINTH_ALBEDO is that light
+        per pixel and channel, so the new colour = style albedo x light keeps the render's shading. src: the image
+        before floor retexturing (its texture-swap negatives may paint over the board). Styles and their weights
+        as the painted plinth (plinth_style): the wall's colour a shade off (the wall just above, relative to the
+        board's own light), white, wood grain along the board, the (retextured) floor's tiles, grey / black. Plus
+        the thin lit top edge, the joint line on the wall above it and a contact line at the floor (1 cm proud of
+        the wall: thor_render does not model the board's top face). Labels: obstacle (already)."""
+        c = self.cfg
+        if pm.sum() < 50:
+            return None
+        light = src / PLINTH_ALBEDO
+        style = rng.choices(self.PLINTH_STYLES, weights=c.plinth_style)[0]
+        ok = pm & geo.valid
+        hp = float(np.percentile(geo.hgt[ok], 98)) if ok.any() else 0.12   # board height (m)
+        # wall pixels just above the board (2-20 px), for the wall colour and the joint line
+        above = np.zeros_like(pm)
+        for k in range(2, 20, 2):
+            above[:-k] |= pm[k:]
+        above &= ~pm & (lab == 0) & geo.valid
+        if style == "wall" and above.sum() < 30:
+            style = "white"                              # no wall in view above the board: a white one
+        free = geo.valid & (lab != 0) & (lab != UNDER)
+        patch = self.floor_patch(img, free, geo, rng) if style == "tiles" else None
+        if style == "tiles" and patch is None:
+            style = "white"                              # no clean floor patch to copy: a white board instead
+        cols = np.nonzero(pm.any(axis=0))[0]
+        s = self._arc(cols, H - 1 - np.argmax(pm[::-1, cols], axis=0), geo, rng)   # along the board (m)
+        g = np.random.default_rng(rng.randint(0, 2**31))
+        if style == "tiles":   # floor tiles laid on the board, mirrored at the patch borders (no seams)
+            n = patch.shape[0]
+            alb = cv2.remap(patch, _mirror(s * 256.0, n), _mirror((hp - geo.hgt) * 256.0 + rng.uniform(0, n), n),
+                            cv2.INTER_LINEAR)
+        elif style == "wood":  # grain along the board (texture rows = height, columns = along)
+            tex, size = strip_texture(rng, ("wood",))
+            ppm = 1024 / size
+            alb = cv2.remap(tex.astype(np.float32) / 255, ((geo.hgt + rng.uniform(0, 1)) * ppm).astype(np.float32),
+                            (s * ppm).astype(np.float32), cv2.INTER_LINEAR, borderMode=cv2.BORDER_WRAP)
+        else:
+            if style == "wall":   # the wall's lit colour over the board's own light: blends, a shade off
+                colour = np.median(img[above], axis=0) / np.maximum(np.median(light[pm], axis=0), 1e-3)
+                colour = colour * rng.uniform(0.85, 1.12)
+            elif style == "white":
+                colour = np.array([rng.uniform(0.82, 0.95)] * 3) * [rng.uniform(0.96, 1.0), 1.0, rng.uniform(0.96, 1.0)]
+            else:                 # grey / black / dark brown
+                colour = np.array(rng.choice([(0.55, 0.55, 0.55), (0.1, 0.1, 0.1), (0.15, 0.22, 0.3)]))
+            alb = np.broadcast_to(np.asarray(colour, np.float32), (H, W, 3))
+        col = alb * light * (1 + 0.02 * g.normal(0, 1, (H, W, 1))).astype(np.float32)
+        top = pm.copy()
+        top[1:] &= ~pm[:-1]                              # board pixel whose upper neighbour is not the board
+        col[top] *= rng.uniform(1.15, 1.35)              # lit top edge
+        bottom = np.zeros_like(pm)
+        bottom[:-1] = pm[:-1] & (lab[1:] != 0)           # board pixel right above the floor
+        col[bottom] *= 0.75                              # contact line
+        img[pm] = col[pm]
+        joint = np.zeros_like(pm)
+        joint[:-1] = top[1:] & ~pm[:-1] & (lab[:-1] == 0)   # wall pixel right above the board's top edge
+        img[joint] *= rng.uniform(0.6, 0.8)              # shadow / caulk line where the board meets the wall
+        lab[pm] = 0                                      # obstacle (the floor rule made it so): explicit
+        return {"h": hp, "style": style, "px": int(pm.sum()), "rendered": True}
 
     def wall_tiles(self, img, lab, geo, rng):
         """Tiled wall base (bathroom, kitchen): procedural tiles unlike the floor's, from the floor up to a random
@@ -552,8 +641,39 @@ class StructAug:
         return {"up": up, "dz": dz, "flat": flat, "door": door, "th": th, "uc": uc, "ve": ve, "len": length,
                 "other": other, "px": int(paint.sum())}
 
-    def threshold(self, img, lab, geo, free, rng):
+    @staticmethod
+    def door_edge(geo, seg):
+        """edge()'s (uc, ve, th, du, dv) for a line along a doorway's floor segment [gx0, gz0, gx1, gz1] (camera
+        yaw frame, m, as thor_render writes them), and the segment's length."""
+        gx0, gz0, gx1, gz1 = seg
+        th = math.atan2(gz1 - gz0, gx1 - gx0)
+        th = (th + math.pi / 2) % math.pi - math.pi / 2   # either direction: keep the normal pointing away (+gz)
+        a, nrm = (math.cos(th), math.sin(th)), (-math.sin(th), math.cos(th))
+        mx, mz = (gx0 + gx1) / 2, (gz0 + gz1) / 2
+        return (a[0] * mx + a[1] * mz, nrm[0] * mx + nrm[1] * mz, th, a[0] * geo.gx1 + a[1] * geo.gz1,
+                nrm[0] * geo.gx1 + nrm[1] * geo.gz1, math.hypot(gx1 - gx0, gz1 - gz0))
+
+    def threshold(self, img, lab, geo, free, rng, doorways=None):
+        """A flush strip across the floor (labelled floor). doorways (renders that list them): in a real doorway
+        in view, its whole width, or nothing; None: a random placement on open floor (door-wide or room-wide)."""
         c = self.cfg
+        if doorways is not None:
+            top = max(rng.uniform(*c.flush_h), 1e-3)
+            width = rng.uniform(*c.thr_width)
+            door = True
+            for seg in rng.sample(doorways, len(doorways)):
+                uc, ve, th, du, dv, length = self.door_edge(geo, seg)
+                if length < 0.4:
+                    continue
+                v0, v1 = ve - width / 2, ve + width / 2
+                tin, face, hit = self.box(geo, du, dv, uc, length, v0, v1, top)
+                paint = hit & free                        # visible floor only (the stored depth hides it behind doors)
+                if paint.sum() >= 40:
+                    break
+            else:
+                return None
+            return self._paint_strip(img, geo, free, rng, top, width, door, length, uc, ve, th, du, dv, v0, v1,
+                                     tin, face, hit, paint, doorway=True)
         cand = free & (geo.gz > c.thr_dist[0]) & (geo.gz < c.thr_dist[1])
         ys, xs = np.nonzero(cand)
         if len(ys) < 50:
@@ -571,6 +691,13 @@ class StructAug:
                 break
         else:
             return None
+        return self._paint_strip(img, geo, free, rng, top, width, door, length, uc, ve, th, du, dv, v0, v1,
+                                 tin, face, hit, paint)
+
+    def _paint_strip(self, img, geo, free, rng, top, width, door, length, uc, ve, th, du, dv, v0, v1, tin, face,
+                     hit, paint, doorway=False):
+        """Paint a placed threshold strip (box top / front / ends) and, room-wide, maybe another flooring beyond."""
+        c = self.cfg
         t = np.where(hit, tin, geo.tf)                    # off the box: the ray's floor point (smooth mip levels)
         u, v, h = t * du, t * dv, geo.cam_h + t * geo.dh1
         ca = np.where(face == 2, v, u)                    # texture coords: (along, across) on top,
@@ -585,7 +712,7 @@ class StructAug:
         shade = floor_shade(img, free)
         img[paint] = (col * shade)[paint]
         info = {"h": top, "width": width, "door": door, "th": th, "uc": uc, "v0": v0, "v1": v1, "len": length,
-                "px": int(paint.sum())}
+                "px": int(paint.sum()), "doorway": doorway}
         if not door and rng.random() < c.p_transition:  # other flooring beyond a room-spanning strip
             beyond = free & ~paint & (geo.tf * dv > v1)
             if beyond.any():

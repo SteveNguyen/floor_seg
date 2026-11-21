@@ -89,6 +89,95 @@ def test_plinth_is_on_the_wall_base_with_its_metric_height(sa, scene, style):
         assert face.min() > 190
 
 
+WALL_BGR = (200, 150, 120)   # a bluish wall, so the "wall" style can be told from white / grey
+
+
+def rendered_plinth_scene(sa, scene, hp=0.12):
+    """The scene with a rendered plinth (thor_render --plinths) on the wall base up to hp: the board in the render's
+    neutral grey (PLINTH_ALBEDO) under a light of 1.0, except its leftmost columns in a shadow (0.6); the wall
+    above in WALL_BGR. Returns (bgr, label, depth, plinth mask, shadowed board mask)."""
+    from floor_seg.aug_structures import PLINTH_ALBEDO
+
+    bgr, label, depth = scene
+    hgt = geom(sa, scene).hgt
+    pm = (label == 0) & (hgt < hp) & (hgt > 0.0)
+    cols = np.nonzero(pm.any(axis=0))[0]
+    shadow = pm & (np.arange(W)[None, :] < cols.min() + 0.2 * (cols.max() - cols.min()))
+    out = bgr.copy()
+    out[(label == 0) & ~pm] = WALL_BGR
+    out[pm] = round(PLINTH_ALBEDO * 255)
+    out[shadow] = round(PLINTH_ALBEDO * 255 * 0.6)
+    return out, label, depth, pm, shadow
+
+
+def run_r(sa, scene3, pm, seed=0, src=None, doorways=None, **p):
+    bgr, label, depth = scene3
+    sa.cfg = replace(OFF, **p)
+    return sa.apply(bgr, label, depth, PITCH, ROLL, CAM_H, random.Random(seed), plinth=pm.astype(np.uint8) * 255,
+                    plinth_src=src, doorways=doorways)
+
+
+@pytest.mark.parametrize("style", StructAug.PLINTH_STYLES)
+def test_rendered_plinth_recoloured_on_its_own_shading(sa, scene, style):
+    bgr, label, depth, pm, shadow = rendered_plinth_scene(sa, scene)
+    weights = tuple(float(s == style) for s in StructAug.PLINTH_STYLES)
+    img, lab, info = run_r(sa, (bgr, label, depth), pm, p_plinth_render=1.0, plinth_style=weights)
+    p = info["plinth"]
+    assert p["rendered"] and p["style"] == style and abs(p["h"] - 0.12) < 0.01
+    assert np.array_equal(lab, label) and (lab[pm] == 0).all()        # obstacle, nothing else changes
+    painted = (img != bgr).any(axis=2)
+    above = np.zeros_like(pm)
+    above[:-1] = pm[1:]                                               # the joint line: one row above the board
+    assert painted[pm].mean() > 0.95 and not (painted & ~pm & ~above).any()
+    hgt = geom(sa, scene).hgt
+    face = pm & (hgt > 0.02) & (hgt < 0.09)                           # no top edge / contact line
+    lit, dark = img[face & ~shadow].astype(float), img[face & shadow].astype(float)
+    if style in ("wall", "white", "plain"):   # plain colours: the render's shadow is kept (light 0.6 vs 1.0)
+        assert abs(dark.mean() / lit.mean() - 0.6) < 0.1
+    if style == "wall":                       # the wall's colour (light 1.0 on most of the board), a shade off
+        assert np.all(np.abs(lit.mean(axis=0) - WALL_BGR) < 0.2 * np.array(WALL_BGR))
+    elif style == "white":
+        assert lit.mean(axis=0).min() > 190
+
+
+def test_rendered_plinth_light_read_before_retexturing(sa, scene):
+    # floor retexturing (texture-swap negatives) may paint over the board: its light is read in plinth_src
+    bgr, label, depth, pm, shadow = rendered_plinth_scene(sa, scene)
+    over = bgr.copy()
+    over[pm] = 40
+    white = tuple(float(s == "white") for s in StructAug.PLINTH_STYLES)
+    img, _, _ = run_r(sa, (over, label, depth), pm, src=bgr, p_plinth_render=1.0, plinth_style=white)
+    assert img[pm & ~shadow].mean() > 190
+
+
+def test_rendered_plinth_replaces_the_painted_one(sa, scene):
+    bgr, label, depth, pm, _ = rendered_plinth_scene(sa, scene)
+    img, _, info = run_r(sa, (bgr, label, depth), pm, p_plinth=1.0, p_wall_tiles=1.0, p_plinth_render=0.0)
+    assert img is bgr and not any(info.values())   # a render with its own plinths gets no painted plinth / tiles
+
+
+def test_threshold_in_a_real_doorway(sa, scene):
+    bgr, label, _ = scene
+    door = [[0.6, 1.4, -0.6, 1.4]]                  # a 1.2 m doorway across the view at 1.4 m (either direction)
+    img, lab, info = run_r(sa, scene, np.zeros(label.shape, bool), doorways=door, p_door_threshold=1.0)
+    t = info["threshold"]
+    assert t["doorway"] and t["door"] and abs(t["len"] - 1.2) < 1e-6 and t["h"] <= 0.012
+    painted = (img != bgr).any(axis=2)
+    g = geom(sa, scene)
+    assert painted.sum() > 100 and np.array_equal(lab, label) and (label[painted] == 1).all()   # floor stays floor
+    # along the doorway's line, within the strip's depth; its top (h) seen past its far edge: floor points up to
+    # h * gz / (cam_h - h) farther (parallax)
+    reach = t["width"] / 2 + t["h"] * 1.5 / (CAM_H - t["h"]) + 0.01
+    assert np.abs(g.gz[painted] - 1.4).max() < reach and np.abs(g.gx[painted]).max() < 0.65
+    # doorways known: the strip goes in one or nowhere (never on open floor), whatever p_threshold says
+    for doors in ([], [[0.6, -1.4, -0.6, -1.4]]):   # none in view / behind the camera
+        img, _, info = run_r(sa, scene, np.zeros(label.shape, bool), doorways=doors, p_door_threshold=1.0,
+                             p_threshold=1.0)
+        assert img is bgr and not info.get("threshold")
+    img, _, info = run_r(sa, scene, np.zeros(label.shape, bool), doorways=door, p_threshold=1.0)
+    assert img is bgr and not info.get("threshold")  # p_door_threshold 0
+
+
 def test_wall_tiles_up_to_their_height(sa, scene):
     bgr, label, _ = scene
     img, lab, info = run(sa, scene, seed=4, p_wall_tiles=1.0, p_plinth=1.0)
@@ -283,6 +372,41 @@ def test_hook_in_training_dataset(renders):
     x, y = tr[0]
     assert x.shape == (3, 192, 320) and y.shape == (192, 320)
     assert va.datasets[0].saug is None
+
+
+def test_training_items_pass_rendered_plinths_and_doorways(renders, monkeypatch):
+    # a thor_render --plinths set: <name>_plinth.png and 'doorways' in stats.jsonl reach StructAug.apply
+    import json
+
+    import cv2
+
+    from floor_seg.train import build_parser, datasets, struct_aug
+
+    stats = [json.loads(line) for line in (renders / "stats.jsonl").read_text().splitlines()]
+    for s in stats:
+        s["doorways"] = [[-0.5, 1.5, 0.5, 1.5]]
+        pm = np.zeros((H, W), np.uint8)
+        pm[H // 2 - 8:H // 2] = 255                   # just above the fake floor (lower half)
+        cv2.imwrite(str(renders / f"{s['name']}_plinth.png"), pm)
+    (renders / "stats.jsonl").write_text("".join(json.dumps(s) + "\n" for s in stats))
+    args = build_parser().parse_args(["--data", str(renders), "--out", "x", "--aug-structures",
+                                      "--aug-p-plinth-render", "0.5", "--aug-p-door-threshold", "0.7"])
+    saug = struct_aug(args)
+    assert (saug.cfg.p_plinth_render, saug.cfg.p_door_threshold) == (0.5, 0.7)
+    seen = []
+    orig = saug.apply
+
+    def spy(*a, **kw):
+        seen.append(kw)
+        return orig(*a, **kw)
+
+    monkeypatch.setattr(saug, "apply", spy)
+    tr, _ = datasets([str(renders)], saug=saug)
+    x, _ = tr[0]
+    assert x.shape == (3, 192, 320)
+    kw = seen[0]
+    assert kw["plinth"] is not None and kw["plinth"].max() == 255 and kw["plinth_src"] is not None
+    assert kw["doorways"] == [[-0.5, 1.5, 0.5, 1.5]]
 
 
 def test_under_value_matches_train():

@@ -137,3 +137,39 @@ step-downs of 10-20 cm often leave the image almost unchanged (uniform floor, ed
 the floor is relabelled obstacle, so the model learns "far floor may be obstacle, no visible cue needed", and its
 far-floor confidence then hangs on texture. Fix to try: keep only steps with visual evidence (another flooring
 beyond, a visible nosing or riser), or drop same-texture step-downs; v9b runs with steps off.
+
+## v9b (`floor_v9b_plinth`, local only): rendered plinths and real doorways, steps off; about equal to v7
+
+thor_v4 = the thor_v3 houses and cameras (same seed) rendered with `thor_render --plinths`: a 1 cm board, 8-20 cm
+high (one height per house), along every room wall, cut at the doors, labelled obstacle by the floor rule;
+`<name>_plinth.png` its pixels; stats.jsonl `doorways` (door floor segments in view). Training recolours the
+board on its rendered shading (style mix: wall colour 40 %, white 30 %, wood 15 %, the retextured floor's tiles
+10 %, grey / black 5 %; lit top edge, joint, contact line) and puts the threshold strips in real doorways
+(`--aug-p-door-threshold`, 0.5), never on open floor. thor_v1 has no plinths: about half the views without.
+Steps / flat flooring changes and 2D strips off (after the v9a diagnosis), no sun / specular, no painted plinths.
+Validation (unaugmented) keeps the rendered boards neutral grey.
+
+```bash
+python -m floor_seg.thor_render --out data/synth/thor_v4 --houses 2000 --views 5 --plinths   # AI2-THOR env
+python -m floor_seg.train --data data/synth/thor_v1 data/synth/thor_v4 --kinds floor \
+    --out models/floor_v9b_plinth --tex data/textures/ambientcg --under --aug-structures \
+    --aug-p-level 0 --aug-p-threshold 0 --workers 16
+```
+
+Synthetic val floor IoU 0.9420. Real test set, cutoff 0.5:
+
+| Group (frames) | v7 | v9b |
+|---|---|---|
+| all (75) | 0.946 (2.7 / 2.9 %) | 0.952 (2.0 / 3.0 %) |
+| plinth (3) | 0.743 (14.2 / 3.3 %) | 0.825 (7.6 / 4.2 %) |
+| passage (26) | 0.962 (2.3 / 1.8 %) | 0.964 (1.7 / 2.0 %) |
+| doorstep (7) | 0.932 (1.8 / 5.0 %) | 0.958 (0.6 / 3.5 %) |
+| ordinary (15) | 0.973 (2.2 / 0.9 %) | 0.971 (2.1 / 1.2 %) |
+| doorstep_rough (3) | 0.869 (0.5 / 12.7 %) | 0.872 (0.3 / 12.5 %) |
+| blocked (5) | 0.931 (1.0 / 5.7 %) | 0.928 (2.1 / 4.8 %) |
+
+Not a measurable gain. Paired over frames (bootstrap 95 % interval of the pooled-IoU difference): +0.006
+[-0.001, +0.013], 12 frames better / 7 worse by > 0.02 (sign test p 0.36); without the 3 plinth frames +0.003
+[-0.003, +0.008]. Plinth false floor halves, but on 3 frames, and thor_v4 also replaces thor_v3 (renders differ),
+so the gain is not cleanly the plinths'. The hallway failure of v9a is gone (passage 0.964). v7 stays the
+default; the test set cannot resolve differences below about 1 point.
