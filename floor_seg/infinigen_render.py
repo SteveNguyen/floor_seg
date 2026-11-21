@@ -358,6 +358,16 @@ def main():
                     break
             if blocked:
                 break
+        # headroom: nothing above the robot lower than the under clearance (else the camera sits under a table
+        # or bed, where the robot cannot be); checked at the centre and on the footprint ring
+        top = floor_z + max(L.CLEARANCE, h + 0.1)
+        for a in [None] + list(range(0, 360, 90)):
+            px, py = (x, y) if a is None else (x + ROBOT_R * math.cos(math.radians(a)),
+                                               y + ROBOT_R * math.sin(math.radians(a)))
+            if scene.ray_cast(dg, Vector((px, py, floor_z + 0.05)), Vector((0, 0, 1)),
+                              distance=top - floor_z - 0.05)[0]:
+                blocked = True
+                break
         if blocked:
             continue
         if mode == "wall":  # face the nearest wall within 0.5-2.5 m
