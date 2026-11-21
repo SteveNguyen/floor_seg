@@ -14,10 +14,23 @@ Code:
 ## What a set contains
 
 Per view `r<room:05d>_<k>`: `.jpg` (640x360 through the calibrated Reachy Mini lens), `_floor.png` (255 floor /
-0 not), `_depth.png` (uint16 mm, optical-axis z); `stats.jsonl` with `name`, `house` (= room index: rooms with
+0 not), `_under.png` (255 = floor with something lower than 0.45 m above it, a subset of floor; as thor_v3),
+`_depth.png` (uint16 mm, optical-axis z); `stats.jsonl` with `name`, `house` (= room index: rooms with
 index % 10 == 0 are the validation split), `kind` = floor, camera `h`, `pitch`, `roll`, `yaw`, `x`, `y`,
-`floor_frac`, `room_type`, `seed`, `floor_material`, `wall_paint`, `cables`, `thresholds`, `aim`, `render_s`.
-No `_under.png` yet (training with `--under` treats it as unknown, as for thor_v1).
+`floor_frac`, `under_frac` (share of the floor), `room_type`, `seed`, `floor_material`, `wall_paint`, `cables`,
+`thresholds`, `aim`, `render_s`.
+
+- **Under** (so the floor below a bed, sofa, low table or chair seat is not trained as plain open floor): measured
+  from the geometry once per room, on thor_render's 2 cm UndersideMap raster with the same rules. Per cell, a ray
+  down from 3 cm above the floor checks contact (something stands there: not under), then a ray straight up from
+  1 mm above the floor gives the height of the lowest surface above, skipping rug tops / cables / strips;
+  structure (walls, doors, windows, skirting, ceiling) and nothing hit count as clear. Under = lowest surface <
+  0.45 m; slat gaps up to ~10 cm closed; free pockets < 0.25 m^2 enclosed by under / contact cells are under.
+  Each floor pixel looks up its world (x, y) (position pass). Cost: 1.5-3 s per room (all cells, 5-15 m^2
+  rooms; `--under-step 2` measures every 2nd cell if a large room is slow), nothing per view.
+- **Heavy-under cap**: a view where under covers > 40 % of the floor is kept at most 1 in 3 per room
+  (ceil(views / 3); 2 of 5), so rooms full of low furniture do not dominate; the others are dropped after
+  rendering (the render time is lost, rare).
 
 - **Labels**: floor = within 1.5 cm of the floor plane (world-position pass) AND the floor object or something
   flat lying on it (thin floor-level objects, cables, threshold strips; object-index pass). Rugs are floor by rule
@@ -75,13 +88,34 @@ done
 ~/infinigen/.venv/bin/python scripts/infinigen_gen.py merge data/synth/infinigen_v1   # stats.jsonl
 ```
 
-QA: add `--overlay` to write `<name>_overlay.jpg` (photo | label: green floor, red not floor).
+QA: add `--overlay` to write `<name>_overlay.jpg` (photo | label: green floor, blue under, red not floor).
 
-Timings (smoke test, RTX 4070 Laptop shared with another render job, 64 samples + denoising, 680x410 pinhole):
-generating a room 28-29 s (+ ~2 s setup), 12-15 s per rendered view, plus a few seconds of collision / floor
-ray checks; ~1.5-2 min per room of 5 views, so ~5-7 h for 200 rooms on one such GPU (faster on a desktop / server
-GPU, divided by the number of GPUs). Output ~0.23 MB per view (~230 MB for 1,000 views); the generated .blend
-files (~70 MB each) are deleted after rendering unless `--keep-blend`.
+### One GPU shared with a training run (e.g. a single RTX 5090 with many CPU cores)
+
+Room generation is CPU-only (~25-40 s per room) and rendering is GPU, so 2-3 shards on the same GPU overlap
+well: while one renders, the others generate. Same GPU for all (no CUDA_VISIBLE_DEVICES split), CPU threads
+capped per Blender process so the training's data loader keeps its cores:
+
+```bash
+cd ~/floor_seg
+for i in 0 1 2; do
+  nohup nice -n 10 ~/infinigen/.venv/bin/python scripts/infinigen_gen.py run --infinigen ~/infinigen \
+      --out data/synth/infinigen_v1 --rooms 200 --views 5 --shard $i 3 --cpu-threads 6 \
+      > infinigen_v1_$i.log 2>&1 &
+done
+watch -n 5 nvidia-smi   # check memory: training + 3 Cycles processes must fit (a room's GPU memory was not
+                        # measured; start with 2 shards if the training already uses most of the 32 GB)
+~/infinigen/.venv/bin/python scripts/infinigen_gen.py merge data/synth/infinigen_v1   # stats.jsonl at the end
+```
+
+If the training slows down too much, stop a shard (`kill` its PID); finished rooms are kept and a restart skips them.
+
+Timings (smoke tests, RTX 4070 Laptop shared with another render job, 64 samples + denoising, 680x410 pinhole):
+generating a room 24-38 s, setup 2-5 s (incl. the under map), 11-15 s per view in simple rooms; a heavier
+living room took 39 s per view and 234 s for its first view (Cycles scene / shader sync with displacement, on a
+shared GPU). So ~1.5-6 min per room of 5 views: plan ~5-15 h for 200 rooms on one such GPU, less on a 5090 and
+with 2-3 overlapping shards. Output ~0.25 MB per view (~250 MB for 1,000 views); the generated .blend files
+(~70 MB each) are deleted after rendering unless `--keep-blend`.
 
 Copy back: `rsync -a --exclude work/ server:~/floor_seg/data/synth/infinigen_v1 data/synth/`.
 
@@ -98,8 +132,8 @@ their floors are already varied, so a run without `--tex` is worth comparing. Sc
 
 ## Limitations / TODO
 
-- No `_under.png` (floor with something < 0.45 m above it): to add with an upward ray / depth render as in
-  thor_render if the pilot is worth scaling.
+- Under: the room's floor bounding box is rastered (L-shaped rooms: cells outside the floor are measured too,
+  harmless: no floor pixel lands there).
 - Single rooms: no corridors, doorways between rooms only in `house` scenes (weight 0 by default).
 - Rug detection is by object name (`rug*`); other mats Infinigen may add under other names are labelled by the
   height rule only.

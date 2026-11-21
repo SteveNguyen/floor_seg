@@ -21,12 +21,22 @@ import random
 import cv2
 import numpy as np
 
+from floor_seg.thor_render import CLEARANCE, CONTACT_M, FP_RES, UndersideMap  # noqa: F401 (used by the renderer)
+
 W, H = 640, 360
 FLOOR_TOL = 0.015      # m, floor-plane tolerance of the height rule
 RUG_TOP = 0.04         # m, a rug's top (1-2 cm thick + wrinkle displacement) is still floor
 MIN_FLOOR = 0.15       # smallest floor fraction kept for a view (as thor_render floor views)
 # object pass index codes (set on the Blender objects, read back from the IndexOB pass)
 IDX_OTHER, IDX_FLOOR, IDX_RUG, IDX_FLAT = 0, 1, 2, 3
+# "under" (floor with something lower than CLEARANCE = 0.45 m above it), same raster and rules as thor_render's
+# UndersideMap (FP_RES 2 cm, slat gaps closed, small enclosed pockets under, contact cells < CONTACT_M not under).
+# Cell heights: the lowest surface above the floor point; CLEAR_H where nothing low is above or only structure
+# (walls, doors, windows); 0 where something stands on the floor there (contact).
+CLEAR_H = 10.0
+# views where under covers more than UNDER_HEAVY of the floor are kept at most 1 in HEAVY_EVERY per room, so rooms
+# full of low furniture do not dominate the set
+UNDER_HEAVY, HEAVY_EVERY = 0.4, 3
 
 # Room types weighted toward ordinary homes. Infinigen 2.0 CLI generators; there is no corridor / hallway room
 # generator, and the furnished house (several rooms, doors between them) is much slower: off by default.
@@ -158,13 +168,45 @@ def labels_from_passes(pos, idx, cam_pos, axes, floor_z):
     return floor, np.clip(depth, 0, None)
 
 
-def finish(rgb_r, floor_r, depth_r, maps):
-    """Remap a pinhole render through the calibrated lens: (rgb uint8 HxWx3, floor 0/255 uint8, depth uint16 mm)."""
+def finish(rgb_r, floor_r, depth_r, maps, under_r=None):
+    """Remap a pinhole render through the calibrated lens: (rgb uint8 HxWx3, floor 0/255 uint8, depth uint16 mm,
+    under 0/255 uint8 or None)."""
     map_x, map_y = maps[:2]
     rgb = cv2.remap(rgb_r, map_x, map_y, cv2.INTER_LINEAR)
     floor = cv2.remap(floor_r.astype(np.uint8), map_x, map_y, cv2.INTER_NEAREST) * 255
     depth = cv2.remap(np.clip(depth_r * 1000, 0, 65535).astype(np.uint16), map_x, map_y, cv2.INTER_NEAREST)
-    return rgb, floor.astype(np.uint8), depth
+    under = None
+    if under_r is not None:
+        under = (cv2.remap(under_r.astype(np.uint8), map_x, map_y, cv2.INTER_NEAREST) * 255).astype(np.uint8)
+    return rgb, floor.astype(np.uint8), depth, under
+
+
+def raster_xy(x0, y0, x1, y1):
+    """World x, y of the cell centres of an UndersideMap over [x0, x1] x [y0, y1] (rows = y, as its rows = z)."""
+    nx, ny = int(np.ceil((x1 - x0) / FP_RES)) + 1, int(np.ceil((y1 - y0) / FP_RES)) + 1
+    return np.meshgrid(x0 + np.arange(nx) * FP_RES, y0 + np.arange(ny) * FP_RES)
+
+
+def underside_map(x0, y0, x1, y1, heights):
+    """thor_render.UndersideMap over a room's floor from measured cell heights (raster_xy cells; CLEAR_H / 0 as
+    above), finished: slat gaps closed, small enclosed pockets under, contact cells not under."""
+    um = UndersideMap(x0, y0, x1, y1)
+    if um.h.shape != heights.shape:
+        raise ValueError(f"heights {heights.shape} != raster {um.h.shape}")
+    um.h[:] = heights
+    um.finish()
+    return um
+
+
+def under_mask(pos, floor, um):
+    """Under pixels of a render: floor pixels whose world (x, y) is under in the UndersideMap (a subset of floor)."""
+    return floor & um.lookup(pos[..., 0], pos[..., 1])
+
+
+def keep_view(under_frac, n_heavy, views):
+    """Whether to keep a view given its under fraction (of its floor) and the heavy views already kept in the room:
+    views with under_frac > UNDER_HEAVY are kept at most ceil(views / HEAVY_EVERY) per room."""
+    return under_frac <= UNDER_HEAVY or n_heavy < math.ceil(views / HEAVY_EVERY)
 
 
 def fit_fisheye_poly(calib_path, sensor_mm=36.0, deg=4):

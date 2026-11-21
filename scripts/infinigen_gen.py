@@ -67,8 +67,10 @@ def run(args):
             work = os.path.join(work_root, f"r{room:05d}_{attempt}")
             shutil.rmtree(work, ignore_errors=True)
             t0 = time.time()
-            g = subprocess.run([cli, gen, "--seed", str(seed), "--output", work, "--save_blend"],
-                               cwd=infinigen, env=env, capture_output=True, text=True, timeout=args.timeout)
+            gcmd = [cli, gen, "--seed", str(seed), "--output", work, "--save_blend"]
+            if args.cpu_threads:
+                gcmd += ["--cpu_threads", str(args.cpu_threads)]
+            g = subprocess.run(gcmd, cwd=infinigen, env=env, capture_output=True, text=True, timeout=args.timeout)
             t_gen = time.time() - t0
             blend = os.path.join(work, "scene.blend")
             if g.returncode != 0 or not os.path.exists(blend):
@@ -83,6 +85,9 @@ def run(args):
                 cmd.append("--overlay")
             if args.cpu_threads:
                 cmd += ["--cpu-threads", str(args.cpu_threads)]
+            if args.no_under:
+                cmd.append("--no-under")
+            cmd += ["--under-step", str(args.under_step)]
             t1 = time.time()
             r = subprocess.run(cmd, cwd=REPO, env=env, capture_output=True, text=True, timeout=args.timeout)
             t_render = time.time() - t1
@@ -124,7 +129,11 @@ def main():
                    help="override the room-type weights, e.g. livingroom=1 bedroom=1 house=0.2")
     r.add_argument("--attempts", type=int, default=3)
     r.add_argument("--timeout", type=int, default=3600, help="s per generation / render call")
-    r.add_argument("--cpu-threads", type=int, default=0)
+    r.add_argument("--cpu-threads", type=int, default=0,
+                   help="CPU threads per Blender process (generation and render; 0 = all): set it when several "
+                        "shards share one machine")
+    r.add_argument("--no-under", action="store_true", help="no _under.png")
+    r.add_argument("--under-step", type=int, default=1, help="measure every n-th 2 cm cell of the under map")
     r.add_argument("--overlay", action="store_true", help="also write <name>_overlay.jpg (QA)")
     r.add_argument("--keep-blend", action="store_true")
     m = sub.add_parser("merge")

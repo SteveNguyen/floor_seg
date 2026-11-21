@@ -77,10 +77,56 @@ def test_finish_output_format():
     rgb_r = np.full((hr, wr, 3), 100, np.uint8)
     floor_r = np.zeros((hr, wr), bool)
     floor_r[hr // 2:] = True
-    rgb, floor, depth = L.finish(rgb_r, floor_r, np.full((hr, wr), 1.234), maps)
+    rgb, floor, depth, under = L.finish(rgb_r, floor_r, np.full((hr, wr), 1.234), maps, under_r=floor_r)
+    assert under.dtype == np.uint8 and (under == floor).all()
+    assert L.finish(rgb_r, floor_r, np.full((hr, wr), 1.0), maps)[3] is None
     assert rgb.shape == (L.H, L.W, 3) and floor.dtype == np.uint8 and set(np.unique(floor)) <= {0, 255}
     assert depth.dtype == np.uint16 and depth[L.H // 2, L.W // 2] == 1234
     assert floor[-1].all() and not floor[0].any()
+
+
+def room_heights():
+    """A 3 x 2 m room raster (2 cm cells): open floor (clear), a bed (underside 0.2 m), a slatted shelf (0.3 m slats
+    4 cm apart), a box standing on the floor (contact), and a 30 x 30 cm free pocket enclosed by a ring of chair
+    stretchers (0.1 m). Returns (bounds, heights, cell xy)."""
+    bounds = (0.0, 0.0, 3.0, 2.0)
+    xs, ys = L.raster_xy(*bounds)
+    h = np.full(xs.shape, L.CLEAR_H, np.float32)
+    h[(xs > 0.2) & (xs < 1.0) & (ys > 0.2) & (ys < 1.6)] = 0.2                       # bed
+    slats = (xs > 1.4) & (xs < 2.0) & (ys > 1.4) & (ys < 1.9)
+    h[slats & ((np.round(ys / 0.02) % 4) < 2)] = 0.3                                   # 4 cm slats, 4 cm gaps
+    h[(xs > 1.2) & (xs < 1.5) & (ys > 0.2) & (ys < 0.5)] = 0.0                         # box on the floor
+    ring = (xs > 2.2) & (xs < 2.7) & (ys > 0.2) & (ys < 0.7)
+    inner = (xs > 2.3) & (xs < 2.6) & (ys > 0.3) & (ys < 0.6)
+    h[ring & ~inner] = 0.1                                                             # stretchers around a pocket
+    return bounds, h, xs, ys
+
+
+def test_underside_map_thor_rules():
+    bounds, h, xs, ys = room_heights()
+    um = L.underside_map(*bounds, h)
+    at = lambda x, y: bool(um.lookup(np.array([x]), np.array([y]))[0])  # noqa: E731
+    assert at(0.6, 0.9)                     # under the bed
+    assert not at(2.0, 1.0) and not at(0.1, 0.1)   # open floor
+    assert at(1.7, 1.65) and at(1.7, 1.63)  # slats and the 4 cm gaps between them (closed)
+    assert not at(1.35, 0.35)               # box standing on the floor: contact, not under
+    assert at(2.45, 0.45)                   # free pocket enclosed by stretchers (< 0.25 m^2): unreachable, under
+    with pytest.raises(ValueError):
+        L.underside_map(*bounds, h[:-1])
+
+
+def test_under_mask_is_a_subset_of_floor():
+    bounds, h, _, _ = room_heights()
+    um = L.underside_map(*bounds, h)
+    pos = np.array([[[0.6, 0.9, 0.0], [0.6, 0.9, 0.0], [2.0, 1.0, 0.0], [5.0, 5.0, 0.0]]])  # last: outside the room
+    floor = np.array([[True, False, True, True]])
+    assert L.under_mask(pos, floor, um).tolist() == [[True, False, False, False]]
+
+
+def test_heavy_under_views_capped_per_room():
+    assert L.keep_view(0.2, 5, 5)                                       # not heavy: always kept
+    assert L.keep_view(0.9, 0, 5) and L.keep_view(0.9, 1, 5) and not L.keep_view(0.9, 2, 5)  # ceil(5 / 3) = 2
+    assert L.keep_view(0.9, 0, 3) and not L.keep_view(0.9, 1, 3)
 
 
 def test_fisheye_polynomial_cannot_match_our_lens():

@@ -20,7 +20,9 @@ Per scene:
   for the lens, then remapped through the calibrated Reachy Mini lens (infinigen_labels.lens_maps), like
   thor_render. A fitted fisheye polynomial cannot match our lens (principal point off-centre, see
   infinigen_labels.fit_fisheye_poly), so the remap is used.
-Outputs (in OUT): <name>.jpg, <name>_floor.png, <name>_depth.png with name = r<room:05d>_<k>, and one stats line
+- under: floor with something lower than 0.45 m above it, from upward ray casts on thor_render's UndersideMap
+  raster (measure_underside); views with under > 40 % of the floor are capped per room (infinigen_labels.keep_view).
+Outputs (in OUT): <name>.jpg, <name>_floor.png, <name>_under.png, <name>_depth.png with name = r<room:05d>_<k>, and one stats line
 per view in OUT/rooms/r<room:05d>.jsonl (the driver merges them into OUT/stats.jsonl).
 Exit codes: 0 done, 3 room rejected (regenerate), 4 no usable view.
 """
@@ -120,6 +122,48 @@ def read_exr(path):
     return pos, idx
 
 
+STRUCT_PREFIX = ("mesh_from_corners", "room_", "plain_wall", "wall_", "cutout", "window", "door", "skirting",
+                 "ceiling")
+
+
+def measure_underside(scene, dg, bounds, floor_z, structure, step=1):
+    """Cell heights for infinigen_labels.underside_map over bounds (x0, y0, x1, y1), from the geometry: per 2 cm
+    cell (every `step`-th, the rest copied from the nearest measured cell)
+    - contact (0): a ray down from CONTACT_M above the floor hits something other than the floor / rug / flat
+      floor-level objects before the floor: an object stands there (the floor is covered);
+    - else a ray straight up from 1 mm above the floor: the height of the first surface it hits below
+      CLEARANCE + 5 cm, skipping floor-level things (rug tops, cables, strips); structure (walls, doors, windows,
+      skirting, ceiling) and nothing hit count as clear (CLEAR_H), as thor_render treats them from below."""
+    xs, ys = L.raster_xy(*bounds)
+    heights = np.full(xs.shape, L.CLEAR_H, np.float32)
+    up, down, top = Vector((0, 0, 1)), Vector((0, 0, -1)), floor_z + L.CLEARANCE + 0.05
+    floorish = (L.IDX_FLOOR, L.IDX_RUG, L.IDX_FLAT)
+    for i in range(0, xs.shape[0], step):
+        for j in range(0, xs.shape[1], step):
+            x, y = float(xs[i, j]), float(ys[i, j])
+            hit = scene.ray_cast(dg, Vector((x, y, floor_z + L.CONTACT_M)), down, distance=L.CONTACT_M + 0.004)
+            if hit[0] and hit[4] is not None and hit[4].original.pass_index not in floorish:
+                heights[i, j] = 0.0
+                continue
+            o = Vector((x, y, floor_z + 0.001))
+            for _ in range(4):
+                hit = scene.ray_cast(dg, o, up, distance=max(top - o.z, 1e-4))
+                if not hit[0] or hit[4] is None:
+                    break
+                ob = hit[4].original
+                if ob.pass_index in floorish:  # a rug top, a cable: look further up
+                    o = hit[1] + up * 0.001
+                    continue
+                if ob not in structure and not ob.name.startswith(STRUCT_PREFIX):
+                    heights[i, j] = hit[1].z - floor_z
+                break
+    if step > 1:  # nearest measured cell
+        ii = np.minimum((np.arange(xs.shape[0]) + step // 2) // step * step, (xs.shape[0] - 1) // step * step)
+        jj = np.minimum((np.arange(xs.shape[1]) + step // 2) // step * step, (xs.shape[1] - 1) // step * step)
+        heights = heights[ii][:, jj]
+    return heights
+
+
 def read_png_bgr(path, w, h):
     """The display-referred render Blender saved, read back through Blender (cv2.imread fails on it inside the
     Blender process: two libpng builds clash). uint8 BGR, top row first."""
@@ -146,6 +190,9 @@ def main():
     ap.add_argument("--no-reject", action="store_true", help="never reject a room (smoke tests)")
     ap.add_argument("--overlay", action="store_true", help="also write <name>_overlay.jpg (photo | label)")
     ap.add_argument("--cpu-threads", type=int, default=0, help="CPU render threads (0 = auto)")
+    ap.add_argument("--no-under", action="store_true", help="no _under.png (no upward ray casts)")
+    ap.add_argument("--under-step", type=int, default=1,
+                    help="measure every n-th 2 cm cell of the under map (the rest: nearest measured cell)")
     args = ap.parse_args(sys.argv[1:])
     rng = L.new_rng(args.seed, args.room)
     t0 = time.time()
@@ -272,15 +319,21 @@ def main():
     vl.use_pass_position = True
     vl.use_pass_object_index = True
     dg = bpy.context.evaluated_depsgraph_get()
+    um, t_under = None, time.time()
+    if not args.no_under:  # once per room, after the cables / strips were added
+        bounds = (fx0, fy0, fx1, fy1)
+        um = L.underside_map(*bounds, measure_underside(scene, dg, bounds, floor_z, set(walls), args.under_step))
+    t_under = time.time() - t_under
 
     # targets for "look at furniture": other objects standing on the floor, 0.1-1.5 m tall
     targets = [((b[0] + b[1]) / 2, (b[2] + b[3]) / 2) for o, b in ((o, boxes[o.name]) for o in meshes)
                if o.pass_index == L.IDX_OTHER and b[4] < 0.1 and 0.1 < b[5] < 1.5 and o not in walls]
     grid = L.pinhole_dirs(wr, hr, f, step=max(wr // 32, 1))
     os.makedirs(os.path.join(args.out, "rooms"), exist_ok=True)
-    lines, k, tries = [], 0, 0
+    lines, k, tries, n_heavy = [], 0, 0, 0
     print(f"room {args.room} {args.room_type}: floor {fkind}, paint {paint and paint[0]}, cables {n_cables}, "
-          f"thresholds {n_thr}, render {wr}x{hr}, {device}, setup {time.time() - t0:.1f} s", flush=True)
+          f"thresholds {n_thr}, render {wr}x{hr}, {device}, under map {t_under:.1f} s"
+          f"{f' ({um.grid.mean():.0%} of the room)' if um else ''}, setup {time.time() - t0:.1f} s", flush=True)
     while k < args.views and tries < 40 * args.views:
         tries += 1
         x, y, yaw, h, pitch, roll = L.sample_pose(rng, (fx0 + 0.3, fx1 - 0.3, fy0 + 0.3, fy1 - 0.3))
@@ -346,24 +399,35 @@ def main():
         bpy.data.images["Render Result"].save_render(filepath=png)   # with the scene's view transform
         pos, idx = read_exr(exr)
         rgb_r = read_png_bgr(png, wr, hr)
-        floor_r, depth_r = L.labels_from_passes(pos.reshape(hr, wr, 3), idx.reshape(hr, wr), cpos, axes, floor_z)
+        pos = pos.reshape(hr, wr, 3)
+        floor_r, depth_r = L.labels_from_passes(pos, idx.reshape(hr, wr), cpos, axes, floor_z)
+        under_r = L.under_mask(pos, floor_r, um) if um is not None else None
         os.remove(exr)
         os.remove(png)
-        rgb, floor, depth = L.finish(rgb_r, floor_r, depth_r, (map_x, map_y))
+        rgb, floor, depth, under = L.finish(rgb_r, floor_r, depth_r, (map_x, map_y), under_r)
         frac = float((floor > 0).mean())
+        ufrac = float((under > 0).sum() / max((floor > 0).sum(), 1)) if under is not None else 0.0
         if frac < L.MIN_FLOOR:
             print(f"  {name}: floor {frac:.2f} < {L.MIN_FLOOR}, dropped ({time.time() - t1:.1f} s)", flush=True)
             continue
+        if not L.keep_view(ufrac, n_heavy, args.views):
+            print(f"  {name}: under {ufrac:.2f} of the floor, heavy views capped, dropped", flush=True)
+            continue
+        n_heavy += ufrac > L.UNDER_HEAVY
         cv2.imwrite(os.path.join(args.out, name + ".jpg"), rgb, [cv2.IMWRITE_JPEG_QUALITY, 95])
         cv2.imwrite(os.path.join(args.out, name + "_floor.png"), floor)
         cv2.imwrite(os.path.join(args.out, name + "_depth.png"), depth)
-        if args.overlay:
+        if under is not None:
+            cv2.imwrite(os.path.join(args.out, name + "_under.png"), under)
+        if args.overlay:  # green floor, blue under (a subset of floor), red not floor
             ov = rgb.copy()
             ov[floor > 0] = (0.5 * ov[floor > 0] + (0, 110, 0)).astype(np.uint8)
             ov[floor == 0] = (0.5 * ov[floor == 0] + (0, 0, 120)).astype(np.uint8)
+            if under is not None:
+                ov[under > 0] = (0.5 * rgb[under > 0] + (130, 40, 0)).astype(np.uint8)
             cv2.imwrite(os.path.join(args.out, name + "_overlay.jpg"), np.hstack([rgb, ov]))
         extra = dict(floor_material=fkind, wall_paint=paint and paint[0], cables=n_cables, thresholds=n_thr,
-                     aim=mode, render_s=round(time.time() - t1, 1))
+                     aim=mode, under_frac=round(ufrac, 4), render_s=round(time.time() - t1, 1))
         lines.append(L.stats_line(name, args.room, args.room_type, args.seed, (x, y, yaw, h, pitch, roll), frac,
                                   extra))
         print(f"  {name}: floor {frac:.2f}, aim {mode}, {time.time() - t1:.1f} s", flush=True)
