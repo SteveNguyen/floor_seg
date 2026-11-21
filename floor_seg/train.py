@@ -28,6 +28,9 @@ real doorways only. Validation is never augmented (its rendered plinths stay neu
     # v9b: thor_v1 (no plinths) + thor_v4 (rendered plinths, doorways)
     python -m floor_seg.train --data data/synth/thor_v1 data/synth/thor_v4 --kinds floor \\
         --out models/floor_v9b_plinth --tex data/textures/ambientcg --under --aug-structures
+    # v10a: v9b + the Infinigen pilot (scripts/infinigen_gen.py), its 720 training views 4 times per epoch
+    python -m floor_seg.train --data data/synth/thor_v1 data/synth/thor_v4 data/synth/infinigen_v1 --repeat 1 1 4 \\
+        --kinds floor --out models/floor_v10a_infinigen --tex data/textures/ambientcg --under --aug-structures
 Saves best.pt (by floor IoU), last.pt, floor.onnx (fp32, from best) and metrics.jsonl.
 """
 import argparse
@@ -154,20 +157,21 @@ class Renders(Dataset):
         return torch.from_numpy(x.copy()), torch.from_numpy(mask.astype(np.int64))
 
 
-def datasets(roots, under=False, kinds=None, ftex=None, saug=None):
+def datasets(roots, under=False, kinds=None, ftex=None, saug=None, repeat=None):
     """Train and val datasets over one or several render folders (e.g. thor_v1 + thor_v3), each split by house
     (house % 10 == 0 -> val). One Renders per folder: view names repeat across folders (same house, same index),
     so names and poses stay per folder. kinds: keep only these view kinds (thor_v1 has none: all floor views).
-    ftex, saug: training augmentations (validation is never augmented)."""
+    ftex, saug: training augmentations (validation is never augmented). repeat: per folder, how many times its
+    training views come in an epoch (a small set mixed with a big one, e.g. infinigen_v1 with thor_v4); default 1."""
     tr, va = [], []
-    for root in roots:
+    for k, root in enumerate(roots):
         stats = [json.loads(line) for line in open(os.path.join(root, "stats.jsonl"))]
         if kinds:
             stats = [s for s in stats if s.get("kind", "floor") in kinds]
         poses = {s["name"]: (s["pitch"], s["roll"], s["h"]) for s in stats}
         doorways = {s["name"]: s.get("doorways") for s in stats}   # None: the set does not list them (thor_v1 / v3)
-        tr.append(Renders(root, [s["name"] for s in stats if s["house"] % 10 != 0], True, poses, ftex, under=under,
-                          saug=saug, doorways=doorways))
+        tr += [Renders(root, [s["name"] for s in stats if s["house"] % 10 != 0], True, poses, ftex, under=under,
+                       saug=saug, doorways=doorways)] * (repeat[k] if repeat else 1)
         va.append(Renders(root, [s["name"] for s in stats if s["house"] % 10 == 0], False, under=under))
     return ConcatDataset(tr), ConcatDataset(va)
 
@@ -212,6 +216,8 @@ def struct_aug(args):
 def build_parser():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--data", required=True, nargs="+", help="one or several render folders (mixed, each split by house)")
+    ap.add_argument("--repeat", type=int, nargs="+", help="per --data folder: times its training views come per epoch "
+                                                         "(oversample a small set; default 1 each)")
     ap.add_argument("--out", required=True)
     ap.add_argument("--epochs", type=int, default=30)
     ap.add_argument("--batch", type=int, default=32)
@@ -246,8 +252,10 @@ def main():
     random.seed(0)
     torch.manual_seed(0)
 
+    if args.repeat and len(args.repeat) != len(args.data):
+        raise SystemExit(f"--repeat needs one count per --data folder ({len(args.data)})")
     ftex = FloorTex(args.tex, args.calib) if args.tex else None
-    train_ds, val_ds = datasets(args.data, args.under, args.kinds, ftex, struct_aug(args))
+    train_ds, val_ds = datasets(args.data, args.under, args.kinds, ftex, struct_aug(args), args.repeat)
     print(f"train {len(train_ds)} views, val {len(val_ds)} views (by house)", flush=True)
     tl = DataLoader(train_ds, batch_size=args.batch,
                     shuffle=True, num_workers=args.workers, drop_last=True, persistent_workers=True)

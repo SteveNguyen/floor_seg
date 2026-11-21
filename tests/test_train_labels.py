@@ -44,6 +44,9 @@ def test_mixed_folders_keep_their_own_labels(tmp_path):
     labs = [set(np.unique(va[i][1].numpy())) for i in range(4)]
     assert labs[0] == labs[1] == {NOT_FLOOR, FLOOR_NA}
     assert labs[2] == labs[3] == {NOT_FLOOR, FLOOR, UNDER}
+    # --repeat: the second folder's training views come 3 times per epoch, validation unchanged
+    tr, va = datasets([str(v1), str(v3)], under=True, repeat=[1, 3])
+    assert len(tr) == 2 + 3 * 2 and len(va) == 4
 
 
 def test_two_channel_loss_unchanged():
