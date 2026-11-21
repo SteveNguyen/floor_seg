@@ -98,6 +98,14 @@ Floor textures for retexturing: ambientCG CC0 1K-JPG colour maps listed in
 [floor_seg/assets/ambientcg_textures.md](floor_seg/assets/ambientcg_textures.md), stored as
 `data/textures/ambientcg/<group>/<AssetId>.jpg` with groups `floor terrazzo marble stone concrete wood rug`.
 
+Photoreal rooms (Infinigen Indoors + Cycles, GPU; same output format, sim pilot of
+[docs/SIM_PLAN.md](docs/SIM_PLAN.md)): install and commands in [docs/INFINIGEN.md](docs/INFINIGEN.md).
+
+```bash
+~/infinigen/.venv/bin/python scripts/infinigen_gen.py run --infinigen ~/infinigen --out data/synth/infinigen_v1 \
+    --rooms 200 --views 5 --shard 0 1
+```
+
 ## Training and evaluation
 
 ```bash
