@@ -154,6 +154,15 @@ def test_floor_kind_from_node_groups():
     assert L.floor_kind([]) == "other"
 
 
+def test_reject_carpet_in_wet_rooms_and_concrete_mostly():
+    assert L.p_reject("carpet", "bathroom") == 1.0
+    assert L.p_reject("carpet", "kitchen") == 1.0
+    assert L.p_reject("carpet", "bedroom") == L.P_REJECT_CARPET
+    assert L.p_reject("concrete", "livingroom") == L.P_REJECT_CONCRETE
+    assert L.p_reject("wood", "bathroom") == 0.0
+    assert L.p_reject("tiles", "livingroom") == 0.0
+
+
 def test_stats_line_is_what_train_reads():
     s = json.loads(L.stats_line("r00012_3", 12, "bedroom", 99, (1, 2, 30, 0.3, 15, -1), 0.4, {"cables": 1}))
     assert s["name"] == "r00012_3" and s["house"] == 12 and s["kind"] == "floor"

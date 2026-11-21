@@ -61,8 +61,20 @@ WALL_PALETTE = [
     ("pastel", 0.15, [(0.62, 0.72, 0.78), (0.66, 0.76, 0.64), (0.82, 0.70, 0.68), (0.84, 0.80, 0.58)]),
 ]
 # floor materials: Infinigen picks concrete / wood planks / carpet / tiles / layered mixes. Plain concrete is rare
-# in homes: such a room is regenerated with this chance.
+# in homes, and Infinigen picks wall-to-wall carpet in about half the rooms (bathrooms included): such a room is
+# regenerated with this chance (carpet: always in wet rooms and dining rooms, half the time elsewhere).
 P_REJECT_CONCRETE = 0.85
+P_REJECT_CARPET = 0.5
+CARPET_NEVER = ("bathroom", "kitchen", "diningroom")
+
+
+def p_reject(fkind, room_type):
+    """Chance of regenerating a room with floor family fkind (floor_kind) in a room of room_type."""
+    if fkind == "concrete":
+        return P_REJECT_CONCRETE
+    if fkind == "carpet":
+        return 1.0 if room_type in CARPET_NEVER else P_REJECT_CARPET
+    return 0.0
 
 
 def weighted(rng, items):

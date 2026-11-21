@@ -9,8 +9,8 @@ scripts/infinigen_gen.py, which generates the room first. Can be run by hand:
 Per scene:
 - objects get an object pass index (floor, rug, flat floor-level objects; infinigen_labels.IDX_*); the floor plane
   height is the floor object's top.
-- "ordinary home" bias: a room whose floor is plain concrete is rejected (exit code 3, the driver regenerates)
-  with infinigen_labels.P_REJECT_CONCRETE; walls are repainted with an ordinary paint (white, cream, beige, grey,
+- "ordinary home" bias: a room whose floor is plain concrete or carpet is rejected (exit code 3, the driver
+  regenerates) with infinigen_labels.p_reject; walls are repainted with an ordinary paint (white, cream, beige, grey,
   soft pastel) with P_PAINT per room type, and the skirting board then mostly white or the wall colour.
 - optional: cables lying on the floor (--cables) and flush door threshold strips (--thresholds), both floor.
 - K cameras: collision-free (rays around the robot's footprint), 0.25-0.40 m above the floor, pitch 5-25 deg
@@ -228,8 +228,8 @@ def main():
 
     # -- ordinary-home bias: floor family, wall paint, skirting colour
     fkind = L.floor_kind([g for m in eval_materials(main_floor, dg) for g in node_groups(m)])
-    if fkind == "concrete" and not args.no_reject and rng.random() < L.P_REJECT_CONCRETE:
-        print("reject: concrete floor", flush=True)
+    if not args.no_reject and rng.random() < L.p_reject(fkind, args.room_type):
+        print(f"reject: {fkind} floor", flush=True)
         sys.exit(3)
     walls = [o for o in meshes if boxes[o.name][4] < 0.05 and boxes[o.name][5] > 1.8
              and min(boxes[o.name][1] - boxes[o.name][0], boxes[o.name][3] - boxes[o.name][2]) < 0.25
