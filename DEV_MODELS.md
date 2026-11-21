@@ -95,23 +95,18 @@ Lessons (side-by-side images of the frames that changed most):
 - **The plinth augmentation did not match real plinths** (mostly painted white or wall-coloured boards 8-20 cm,
   rarely tiles): no gain on real plinths.
 
-## v9 (planned): two ablation runs
+## v9a (training): steps and door-wide thresholds only
 
 Augmentations revised after v8 (current defaults of [floor_seg/aug_structures.py](floor_seg/aug_structures.py)):
-real steps only (10-20 cm, obstacle); flat flooring changes (<= 1 cm, floor) as frequent as steps and 70 % with
-another flooring beyond; threshold strips unchanged; sun / specular off; plinths on 60 % of images, 8-20 cm, styles
-wall colour 40 %, white 30 %, wood 15 %, floor tiles 10 %, grey / black 5 %, with a lit top edge, a joint line
-on the wall and a contact line; tiled wall bases (bathroom) 10 %, instead of a plinth.
-Preview: `python -m floor_seg.aug_preview --data data/synth/thor_v3 --n 6 --out p.jpg` (one column per
-augmentation), or one training configuration: `--n 12 --all-only --set p_plinth=0 p_wall_tiles=0`.
-
-- **v9a**: v7 + threshold strips + the new level changes (no plinth, no wall tiles).
-- **v9b**: v9a + the new plinths and wall tiles. v9a vs v9b isolates the plinth effect.
+real steps only (10-20 cm, obstacle) in 5 % of views; flat flooring changes (<= 1 cm, floor) 3x as often, 70 %
+with another flooring beyond; threshold strips and level edges door-wide only (room-wide ones in open floor
+looked like random bars); sun / specular off. Plinths and tiled wall bases are off: painted in 2D they also land
+on doors, cabinets and bins (the renders have no wall mask). The 2D plinth styles (wall colour, white, wood,
+floor tiles, grey / black; lit top edge, joint line, contact line) stay available (`--aug-p-plinth`).
+Next (v9b): plinths and doorway thresholds rendered in 3D in `thor_render` (walls and doors are known there).
+Preview: `python -m floor_seg.aug_preview --data data/synth/thor_v3 --n 12 --all-only --out p.jpg`.
 
 ```bash
 python -m floor_seg.train --data data/synth/thor_v1 data/synth/thor_v3 --kinds floor \
-    --out models/floor_v9a_steps --tex data/textures/ambientcg --under --aug-structures \
-    --aug-p-plinth 0 --aug-p-wall-tiles 0
-python -m floor_seg.train --data data/synth/thor_v1 data/synth/thor_v3 --kinds floor \
-    --out models/floor_v9b_plinth --tex data/textures/ambientcg --under --aug-structures
+    --out models/floor_v9a_steps --tex data/textures/ambientcg --under --aug-structures
 ```

@@ -85,7 +85,9 @@ class StructAugCfg:
     # plinth / skirting board on wall bases (labelled obstacle). Most home walls have one: a thin strip (~1 cm
     # deep) 8-20 cm tall, painted to blend with the wall or white, sometimes bare wood, rarely tiles matching the
     # floor (v8 had 70 % floor tiles and 5-12 cm: it did not help on real plinths)
-    p_plinth: float = 0.6
+    # off by default: painted in 2D they also land on doors, cabinets and bins (no wall mask in the renders);
+    # to be replaced by plinths rendered in 3D along the walls (thor_render)
+    p_plinth: float = 0.0
     plinth_h: tuple = (0.08, 0.20)       # m, plinth height
     # style weights: wall colour (a shade off), white, wood, the floor's own tiles, other plain (grey / black)
     plinth_style: tuple = (0.4, 0.3, 0.15, 0.1, 0.05)
@@ -93,14 +95,15 @@ class StructAugCfg:
     contact_h: float = 0.03              # m, a non-floor pixel this close to the floor touches it
     # tiled wall base (bathroom, kitchen): tiles unlike the floor's up to wall_tile_h (labelled obstacle); a wall
     # gets either this or a plinth
-    p_wall_tiles: float = 0.1
+    p_wall_tiles: float = 0.0            # off by default, same reason as the plinths
     wall_tile_h: tuple = (0.5, 2.0)      # m (above the image top: the whole visible wall)
     # threshold / doorstep strip across the floor (labelled floor)
     p_threshold: float = 0.3
     thr_dist: tuple = (0.5, 2.5)         # m ahead (gz) of a point of the strip / level edge
     thr_width: tuple = (0.03, 0.10)      # m, strip depth on the floor
     thr_angle: float = 25.0              # deg, strip / edge direction around "across the view"
-    p_door: float = 0.5                  # door-wide strip / level change, else it spans the room
+    p_door: float = 1.0                  # door-wide strip / level change, else it spans the room (room-wide
+    #                                      strips in open floor looked like random bars: door-wide only)
     door_len: tuple = (0.7, 1.0)         # m
     flush_h: tuple = (0.0, 0.012)        # m, flush / low threshold: floor (robot drives over it)
     p_transition: float = 0.3            # room-spanning strip: other flooring beyond it
@@ -109,10 +112,10 @@ class StructAugCfg:
     # image shows). v8 used 2-18 cm, mostly with no visible cue, and learned the shortcut "other flooring past a
     # line = obstacle" (it refused flat doorways). Flat flooring changes, labelled floor, are now as frequent as
     # steps and mostly show another flooring, so a texture change alone no longer means obstacle.
-    p_level: float = 0.3
+    p_level: float = 0.2                 # with p_level_flat 0.75: a real step in 5 % of views (rare in homes)
     p_level_up: float = 0.5              # step up, else step down
     level_dz: tuple = (0.10, 0.20)       # m, |dz| of a step: riser and floor beyond are obstacle
-    p_level_flat: float = 0.5            # drivable level change instead: |dz| <= flat_dz, stays floor
+    p_level_flat: float = 0.75           # drivable level change instead: |dz| <= flat_dz, stays floor
     flat_dz: float = 0.01                # m
     p_level_other: float = 0.3           # step: other flooring beyond the edge
     p_flat_other: float = 0.7            # flat change: other flooring beyond the edge

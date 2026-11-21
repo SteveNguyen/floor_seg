@@ -102,11 +102,15 @@ def test_wall_tiles_up_to_their_height(sa, scene):
     assert painted[wall_low].mean() > 0.95
 
 
-def test_defaults_match_the_v9_plan():
+def test_defaults_match_the_v9a_plan():
     d = StructAugCfg()
     assert d.p_sun == 0.0 and d.p_specular == 0.0         # off: v8 called white wall bases floor
-    assert d.level_dz == (0.10, 0.20) and d.p_level_flat == 0.5 and d.p_flat_other > 0.5
-    assert d.plinth_h == (0.08, 0.20) and d.p_plinth >= 0.5
+    # real steps only, in 5 % of views; flat flooring changes 3x as often, mostly with another flooring
+    assert d.level_dz == (0.10, 0.20) and d.p_flat_other > 0.5
+    assert d.p_level * (1 - d.p_level_flat) == pytest.approx(0.05)
+    assert d.p_door == 1.0                                # strips / edges door-wide only
+    assert d.p_plinth == 0.0 and d.p_wall_tiles == 0.0    # 2D plinths / tiles off (they land on doors, objects)
+    assert d.plinth_h == (0.08, 0.20)
 
 
 def test_flush_threshold_stays_floor(sa, scene):
