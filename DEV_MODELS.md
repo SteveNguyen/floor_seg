@@ -128,3 +128,12 @@ motion-blurred tiled hallway (5 frames of one run): v9a calls large patches of t
 (IoU 0.99 -> 0.37); v8 did not fail there, so the cause is not isolated (candidates: frequent flooring changes,
 steps whose lower floor keeps the same texture, or run-to-run variance). Plinths get worse with no plinth
 augmentation (floor-matching tiled plinths read as floor).
+
+Diagnosis of the hallway failure (no retraining): v9a is unsure there rather than confidently wrong (missed floor
+mostly at p 0.1-0.5, diffuse over the far floor, no sharp edge at a grout line). Smoothing the speckled tile
+texture (median 9 px) or blurring the frame restores v9a (IoU 0.37 -> 0.99 on the worst frame); brightening makes
+it worse. Previewing steps with the same texture beyond (p_level_other 0.7 of steps) shows the likely source:
+step-downs of 10-20 cm often leave the image almost unchanged (uniform floor, edge barely visible) while most of
+the floor is relabelled obstacle, so the model learns "far floor may be obstacle, no visible cue needed", and its
+far-floor confidence then hangs on texture. Fix to try: keep only steps with visual evidence (another flooring
+beyond, a visible nosing or riser), or drop same-texture step-downs; v9b runs with steps off.
