@@ -173,3 +173,33 @@ Not a measurable gain. Paired over frames (bootstrap 95 % interval of the pooled
 [-0.003, +0.008]. Plinth false floor halves, but on 3 frames, and thor_v4 also replaces thor_v3 (renders differ),
 so the gain is not cleanly the plinths'. The hallway failure of v9a is gone (passage 0.964). v7 stays the
 default; the test set cannot resolve differences below about 1 point.
+
+## v10a (`floor_v10a_infinigen`, local only): v9b + the Infinigen pilot; best on the real test set
+
+infinigen_v1 = `scripts/infinigen_gen.py` (docs/INFINIGEN.md), 200 rooms x 5 views on the RTX 5090 (3 shards,
+~85 min): 805 views from 163 rooms (37 rooms rejected 3 times, mostly concrete); floors wood 140 / concrete 26 /
+carpet 23 rooms (carpet only in bedrooms and living rooms). Same recipe as v9b plus infinigen_v1, whose 720
+training views come 4 times per epoch (`--repeat`, ~14 % of an epoch); 85 more validation views.
+
+```bash
+python -m floor_seg.train --data data/synth/thor_v1 data/synth/thor_v4 data/synth/infinigen_v1 --repeat 1 1 4 \ --kinds floor --out models/floor_v10a_infinigen --tex data/textures/ambientcg --under --aug-structures \ --aug-p-level 0 --aug-p-threshold 0 --workers 16
+```
+
+Synthetic val floor IoU 0.9413 (v9b 0.9420; 96 % of the val set is ProcTHOR). Real test set, cutoff 0.5:
+
+| Group (frames) | v7 | v9b | v10a |
+|---|---|---|---|
+| all (75) | 0.946 (2.7 / 2.9 %) | 0.952 (2.0 / 3.0 %) | 0.962 (1.4 / 2.5 %) |
+| plinth (3) | 0.743 (14.2 / 3.3 %) | 0.825 (7.6 / 4.2 %) | 0.943 (1.2 / 3.3 %) |
+| passage (26) | 0.962 (2.3 / 1.8 %) | 0.964 (1.7 / 2.0 %) | 0.971 (1.0 / 2.1 %) |
+| doorstep (7) | 0.932 (1.8 / 5.0 %) | 0.958 (0.6 / 3.5 %) | 0.963 (0.9 / 2.7 %) |
+| ordinary (15) | 0.973 (2.2 / 0.9 %) | 0.971 (2.1 / 1.2 %) | 0.976 (1.5 / 1.2 %) |
+| doorstep_rough (3) | 0.869 (0.5 / 12.7 %) | 0.872 (0.3 / 12.5 %) | 0.933 (0.6 / 6.1 %) |
+| blocked (5) | 0.931 (1.0 / 5.7 %) | 0.928 (2.1 / 4.8 %) | 0.925 (1.2 / 6.1 %) |
+
+Paired over frames: vs v7 +0.015 [+0.006, +0.026], 19 frames better / 7 worse (sign test p 0.03), still
++0.009 [+0.002, +0.016] without the plinth frames. vs v9b +0.010 [+0.002, +0.018], 16 / 9 (p 0.23); without
+the plinth frames +0.006 [-0.001, +0.013]. The first synthetic change that beats v7 beyond noise; most of the
+gain over v9b is plinths (false floor on them 7.6 -> 1.2 %). Worse frames: the tiled hallway run (172522, -0.005
+vs v9b), far floor beyond a doorway missed, a flat bag strap called floor. With 720 training views from 146 rooms,
+the next test is more Infinigen rooms.
