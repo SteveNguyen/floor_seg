@@ -45,10 +45,18 @@ index % 10 == 0 are the validation split), `kind` = floor, camera `h`, `pitch`, 
   cannot match it (rms 19 px, max 31 px at 640x360: the model is centred, our principal point is ~16 px off).
 - **Ordinary homes** (knobs in `floor_seg/infinigen_labels.py`):
   - room types: living 30 %, bedroom 25 %, kitchen 18 %, dining 12 %, bathroom 15 %; Infinigen 2.0 has no
-    corridor room; `house_furnished_rand` (several rooms with doors) is available as `house` with weight 0
-    (much slower, untested here): `--room-weights livingroom=1 ... house=0.2`.
-  - floors: Infinigen draws concrete / wood planks / carpet / indoor tiles / layered mixes; a room whose floor is
-    plain concrete is regenerated with probability 0.85.
+    corridor room; `house_furnished_rand` (several rooms with doors: floor seen through doorways) is `house`,
+    15 % of the draws since infinigen_v2 (slower; cameras and the under map then cover all floors at the main
+    floor's level). `--room-weights` overrides the weights.
+  - floors: Infinigen draws concrete / wood planks / carpet / indoor tiles / layered mixes, mostly wood (pilot
+    infinigen_v1: no room detected as tiles). Without `--tex`, a room with a concrete floor is regenerated with
+    probability 0.85, a carpeted one always in bathrooms / kitchens / dining rooms, else 0.5. With `--tex
+    data/textures/ambientcg` (the training textures; since infinigen_v2) the floor is re-materialled instead
+    (`floor_plan` / `floor_look`): replaced concrete and carpet become tiles (bathroom 80 %, kitchen 70 %,
+    dining / house 30 %, else 15 %) or wood, and wood floors become tiles with the same chances, about a third of
+    the rooms tiled. Tiles: ambientCG tile photos 50 %, floor_tex.procedural_tiles 30 %, terrazzo / marble /
+    stone 20 %; laid in world x-y along the walls (45 deg 10 %), bump from the image, roughness 0.05-0.45
+    (glazed tiles reflect). The room's log prints the floor's Infinigen node groups (to check floor_kind).
   - walls: Infinigen's wall materials include bricks, hexagonal concrete, tiles, wood planks and patterned paint;
     the walls are repainted with an ordinary matte paint (white / off-white 40 %, cream 15 %, beige 15 %, light
     grey 15 %, soft pastel 15 %; an accent wall 20 %) in 90 % of rooms (kitchens 60 %, bathrooms 35 %: tiles are
@@ -76,7 +84,8 @@ git clone <floor_seg repo> ~/floor_seg && git -C ~/floor_seg checkout infinigen
 
 ## Generate the pilot set (~1,000 images: 200 rooms x 5 views)
 
-One process per GPU, sharded by room index; re-running skips finished rooms:
+One process per GPU, sharded by room index; re-running skips finished rooms. infinigen_v2 (1,000 rooms) is the
+same with `--out data/synth/infinigen_v2 --rooms 1000 --tex data/textures/ambientcg`:
 
 ```bash
 cd ~/floor_seg

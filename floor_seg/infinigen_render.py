@@ -9,9 +9,11 @@ scripts/infinigen_gen.py, which generates the room first. Can be run by hand:
 Per scene:
 - objects get an object pass index (floor, rug, flat floor-level objects; infinigen_labels.IDX_*); the floor plane
   height is the floor object's top.
-- "ordinary home" bias: a room whose floor is plain concrete or carpet is rejected (exit code 3, the driver
-  regenerates) with infinigen_labels.p_reject; walls are repainted with an ordinary paint (white, cream, beige, grey,
-  soft pastel) with P_PAINT per room type, and the skirting board then mostly white or the wall colour.
+- "ordinary home" bias: with --tex (ambientCG textures, as for training), each floor is kept or re-materialled
+  as tiles (photo or floor_tex.procedural_tiles) or wood (infinigen_labels.floor_plan / floor_look): carpet and
+  concrete replaced where they used to be rejected, some wood floors tiled. Without --tex, a room whose floor is
+  plain concrete or carpet is rejected (exit code 3, the driver regenerates) with infinigen_labels.p_reject.
+  Walls are repainted with an ordinary paint (white, cream, beige, grey, soft pastel) with P_PAINT per room type, and the skirting board then mostly white or the wall colour.
 - optional: cables lying on the floor (--cables) and flush door threshold strips (--thresholds), both floor.
 - K cameras: collision-free (rays around the robot's footprint), 0.25-0.40 m above the floor, pitch 5-25 deg
   down, roll +-3 deg; yaw toward furniture / objects 40 %, toward a wall 30 %, random 30 %; a ray grid checks
@@ -88,6 +90,67 @@ def plain_material(name, rgb, roughness):
     bsdf.inputs["Base Color"].default_value = (*rgb, 1.0)
     bsdf.inputs["Roughness"].default_value = roughness
     return m
+
+
+def texture_floor_material(mat, img_path, size_m, roughness, rot_deg, rng):
+    """Replace a material's nodes (in place, like paint_material: Infinigen may set materials from geometry
+    nodes) with a colour image laid on the floor in world coordinates (x, y; one repeat = size_m), rotated by
+    rot_deg, a bump from the image's brightness (grout lines sink) and the given roughness."""
+    nt = mat.node_tree
+    nt.nodes.clear()
+    out = nt.nodes.new("ShaderNodeOutputMaterial")
+    bsdf = nt.nodes.new("ShaderNodeBsdfPrincipled")
+    geo = nt.nodes.new("ShaderNodeNewGeometry")
+    mp = nt.nodes.new("ShaderNodeMapping")
+    mp.inputs["Location"].default_value = (rng.uniform(0, 1), rng.uniform(0, 1), 0)
+    mp.inputs["Rotation"].default_value = (0, 0, math.radians(rot_deg))
+    mp.inputs["Scale"].default_value = (1 / size_m, 1 / size_m, 1)
+    tex = nt.nodes.new("ShaderNodeTexImage")
+    tex.image = bpy.data.images.load(img_path)
+    tex.extension = "REPEAT"
+    bw = nt.nodes.new("ShaderNodeRGBToBW")
+    bump = nt.nodes.new("ShaderNodeBump")
+    bump.inputs["Strength"].default_value = rng.uniform(0.3, 0.8)
+    bump.inputs["Distance"].default_value = 0.001   # m: brightness 0..1 = 1 mm of relief (grout, texture)
+    bsdf.inputs["Roughness"].default_value = roughness
+    nt.links.new(geo.outputs["Position"], mp.inputs["Vector"])
+    nt.links.new(mp.outputs["Vector"], tex.inputs["Vector"])
+    nt.links.new(tex.outputs["Color"], bsdf.inputs["Base Color"])
+    nt.links.new(tex.outputs["Color"], bw.inputs["Color"])
+    nt.links.new(bw.outputs["Val"], bump.inputs["Height"])
+    nt.links.new(bump.outputs["Normal"], bsdf.inputs["Normal"])
+    nt.links.new(bsdf.outputs["BSDF"], out.inputs["Surface"])
+
+
+def refloor(floors, kinds, room_type, tex_root, tmp_prefix, dg, rng):
+    """Re-material each floor object with infinigen_labels.floor_plan (kinds: its floor family). Returns the
+    final family per floor ("carpet", "tiles:floor", "tiles:procedural", "wood:wood", ...) and the temporary
+    procedural texture files (deleted by the caller after the renders)."""
+    import glob
+
+    from floor_seg.floor_tex import procedural_tiles
+
+    final, tmp, done = [], [], set()
+    os.makedirs(os.path.dirname(tmp_prefix), exist_ok=True)
+    for i, (o, fkind) in enumerate(zip(floors, kinds)):
+        plan = L.floor_plan(fkind, room_type, rng)
+        if plan == "keep":
+            final.append(fkind)
+            continue
+        group, size, rough, rot = L.floor_look(plan, rng)
+        if group == "procedural":
+            img, size = procedural_tiles(rng)
+            path = f"{tmp_prefix}_tiles{i}.png"
+            cv2.imwrite(path, img)
+            tmp.append(path)
+        else:
+            path = rng.choice(sorted(glob.glob(os.path.join(tex_root, group, "*.jpg"))))
+        for m in eval_materials(o, dg):
+            if m.node_tree and m.name not in done:   # a material shared by two floors: the first plan wins
+                texture_floor_material(m, path, size, rough, rot, rng)
+                done.add(m.name)
+        final.append(f"{plan}:{group}")
+    return final, tmp
 
 
 def setup_gpu(scene):
@@ -187,6 +250,8 @@ def main():
     ap.add_argument("--calib", default=DEFAULT_CALIB)
     ap.add_argument("--cables", type=float, default=0.0, help="chance per room of 1-3 cables on the floor")
     ap.add_argument("--thresholds", type=float, default=0.0, help="chance per door of a flush threshold strip")
+    ap.add_argument("--tex", help="ambientCG texture root (data/textures/ambientcg): re-material floors instead of "
+                                    "rejecting rooms (infinigen_labels.floor_plan)")
     ap.add_argument("--no-reject", action="store_true", help="never reject a room (smoke tests)")
     ap.add_argument("--overlay", action="store_true", help="also write <name>_overlay.jpg (photo | label)")
     ap.add_argument("--cpu-threads", type=int, default=0, help="CPU render threads (0 = auto)")
@@ -224,13 +289,26 @@ def main():
         o.pass_index = L.IDX_FLOOR
     for o in rugs:
         o.pass_index = L.IDX_RUG
-    fx0, fx1, fy0, fy1 = boxes[main_floor.name][:4]
+    # cameras and the under map over all floors at the main floor's level (a house: several rooms)
+    level = [o for o in floors if abs(boxes[o.name][5] - floor_z) < 0.02]
+    fx0, fx1 = min(boxes[o.name][0] for o in level), max(boxes[o.name][1] for o in level)
+    fy0, fy1 = min(boxes[o.name][2] for o in level), max(boxes[o.name][3] for o in level)
 
     # -- ordinary-home bias: floor family, wall paint, skirting colour
-    fkind = L.floor_kind([g for m in eval_materials(main_floor, dg) for g in node_groups(m)])
-    if not args.no_reject and rng.random() < L.p_reject(fkind, args.room_type):
-        print(f"reject: {fkind} floor", flush=True)
-        sys.exit(3)
+    groups = [[g for m in eval_materials(o, dg) for g in node_groups(m)] for o in level]
+    kinds = [L.floor_kind(g) for g in groups]
+    fkind = kinds[0]
+    print(f"floors: {len(level)}, main {fkind}, node groups {sorted(set(groups[0]))}", flush=True)
+    tmp_tex = []
+    if args.tex:
+        finals, tmp_tex = refloor(level, kinds, args.room_type, args.tex,
+                                  os.path.join(args.out, "rooms", f"r{args.room:05d}"), dg, rng)
+        floor_final = finals[0]
+    else:
+        if not args.no_reject and rng.random() < L.p_reject(fkind, args.room_type):
+            print(f"reject: {fkind} floor", flush=True)
+            sys.exit(3)
+        floor_final = fkind
     walls = [o for o in meshes if boxes[o.name][4] < 0.05 and boxes[o.name][5] > 1.8
              and min(boxes[o.name][1] - boxes[o.name][0], boxes[o.name][3] - boxes[o.name][2]) < 0.25
              and max(boxes[o.name][1] - boxes[o.name][0], boxes[o.name][3] - boxes[o.name][2]) > 1.2]
@@ -331,7 +409,8 @@ def main():
     grid = L.pinhole_dirs(wr, hr, f, step=max(wr // 32, 1))
     os.makedirs(os.path.join(args.out, "rooms"), exist_ok=True)
     lines, k, tries, n_heavy = [], 0, 0, 0
-    print(f"room {args.room} {args.room_type}: floor {fkind}, paint {paint and paint[0]}, cables {n_cables}, "
+    print(f"room {args.room} {args.room_type}: floor {fkind} -> {floor_final}, paint {paint and paint[0]}, "
+          f"cables {n_cables}, "
           f"thresholds {n_thr}, render {wr}x{hr}, {device}, under map {t_under:.1f} s"
           f"{f' ({um.grid.mean():.0%} of the room)' if um else ''}, setup {time.time() - t0:.1f} s", flush=True)
     while k < args.views and tries < 40 * args.views:
@@ -436,12 +515,15 @@ def main():
             if under is not None:
                 ov[under > 0] = (0.5 * rgb[under > 0] + (130, 40, 0)).astype(np.uint8)
             cv2.imwrite(os.path.join(args.out, name + "_overlay.jpg"), np.hstack([rgb, ov]))
-        extra = dict(floor_material=fkind, wall_paint=paint and paint[0], cables=n_cables, thresholds=n_thr,
+        extra = dict(floor_material=floor_final, floor_infinigen=fkind, wall_paint=paint and paint[0],
+                     cables=n_cables, thresholds=n_thr,
                      aim=mode, under_frac=round(ufrac, 4), render_s=round(time.time() - t1, 1))
         lines.append(L.stats_line(name, args.room, args.room_type, args.seed, (x, y, yaw, h, pitch, roll), frac,
                                   extra))
         print(f"  {name}: floor {frac:.2f}, aim {mode}, {time.time() - t1:.1f} s", flush=True)
         k += 1
+    for path in tmp_tex:
+        os.remove(path)
     with open(os.path.join(args.out, "rooms", f"r{args.room:05d}.jsonl"), "w") as fo:
         fo.write("".join(s + "\n" for s in lines))
     print(f"room {args.room}: {k} views, {tries} poses tried, {time.time() - t0:.1f} s", flush=True)

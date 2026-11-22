@@ -8,8 +8,10 @@ Run it with Infinigen's Python (it has numpy and OpenCV; floor_seg's own env is 
 programs of the Infinigen clone:
 1. `<infinigen>/.venv/bin/infinigen <room generator> --seed S --output WORK --save_blend` (the room, ~0.5-1 min)
 2. `<infinigen>/.venv/bin/python -m floor_seg.infinigen_render WORK/scene.blend OUT ...` (views, labels)
-Room types are drawn per room index with the ordinary-home weights of floor_seg/infinigen_labels.py; a rejected
-room (plain concrete floor, exit code 3) is regenerated with the next seed (up to --attempts). Resumable: a room
+Room types are drawn per room index with the ordinary-home weights of floor_seg/infinigen_labels.py (15 %
+furnished houses: several rooms with doors). With --tex, floors are re-materialled (tiles, wood) where Infinigen's
+pick is unusual; without, such a room is rejected (exit code 3) and regenerated with the next seed (up to
+--attempts). Resumable: a room
 with OUT/rooms/r<room>.done is skipped. Rooms with index % 10 == 0 are the validation split in training.
 """
 import argparse
@@ -81,6 +83,8 @@ def run(args):
             cmd = [py, "-m", "floor_seg.infinigen_render", blend, out, "--room", str(room), "--room-type", rtype,
                    "--seed", str(seed), "--views", str(args.views), "--samples", str(args.samples),
                    "--cables", str(args.cables), "--thresholds", str(args.thresholds)]
+            if args.tex:
+                cmd += ["--tex", os.path.abspath(os.path.expanduser(args.tex))]
             if args.overlay:
                 cmd.append("--overlay")
             if args.cpu_threads:
@@ -91,7 +95,7 @@ def run(args):
             t1 = time.time()
             r = subprocess.run(cmd, cwd=REPO, env=env, capture_output=True, text=True, timeout=args.timeout)
             t_render = time.time() - t1
-            log = [s for s in r.stdout.splitlines() if s.startswith(("room", "  r", "reject", "no floor"))]
+            log = [s for s in r.stdout.splitlines() if s.startswith(("room", "  r", "reject", "no floor", "floors"))]
             print("\n".join(log) or r.stdout[-1500:], flush=True)
             if not args.keep_blend:
                 shutil.rmtree(work, ignore_errors=True)
@@ -125,6 +129,8 @@ def main():
     r.add_argument("--samples", type=int, default=64)
     r.add_argument("--cables", type=float, default=0.3, help="chance per room of 1-3 cables on the floor")
     r.add_argument("--thresholds", type=float, default=0.5, help="chance per door of a flush threshold strip")
+    r.add_argument("--tex", help="ambientCG texture root (data/textures/ambientcg): floors re-materialled (tiles, "
+                                   "wood) instead of rooms rejected (infinigen_labels.floor_plan)")
     r.add_argument("--room-weights", nargs="+", metavar="TYPE=W",
                    help="override the room-type weights, e.g. livingroom=1 bedroom=1 house=0.2")
     r.add_argument("--attempts", type=int, default=3)

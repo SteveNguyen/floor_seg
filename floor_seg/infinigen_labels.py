@@ -39,14 +39,15 @@ CLEAR_H = 10.0
 UNDER_HEAVY, HEAVY_EVERY = 0.4, 3
 
 # Room types weighted toward ordinary homes. Infinigen 2.0 CLI generators; there is no corridor / hallway room
-# generator, and the furnished house (several rooms, doors between them) is much slower: off by default.
+# generator; the furnished house (several rooms, doors between them: floor seen through doorways) is slower, so a
+# small share.
 ROOM_TYPES = {
     "livingroom": ("room_livingroom_rand", 0.30),
     "bedroom": ("room_bedroom_rand", 0.25),
     "kitchen": ("room_kitchen_rand", 0.18),
     "diningroom": ("room_diningroom_rand", 0.12),
     "bathroom": ("room_bathroom_rand", 0.15),
-    "house": ("house_furnished_rand", 0.0),
+    "house": ("house_furnished_rand", 0.15),
 }
 # chance of repainting the walls with an ordinary paint colour, per room type (bathrooms and kitchens keep
 # Infinigen's tiled / patterned walls more often: tiles are normal there)
@@ -75,6 +76,43 @@ def p_reject(fkind, room_type):
     if fkind == "carpet":
         return 1.0 if room_type in CARPET_NEVER else P_REJECT_CARPET
     return 0.0
+
+
+# With floor textures (render --tex, data/textures/ambientcg as for training): a floor Infinigen would have rejected
+# is re-materialled instead (no wasted generation), and some wood floors become tiles, so tiled floors (rare in
+# Infinigen's draws, common in real kitchens, bathrooms and hallways) make about a third of the rooms.
+# P_TILES: chance that a floor being replaced, or a wood floor, becomes tiles, per room type ("house": several rooms).
+P_TILES = {"bathroom": 0.8, "kitchen": 0.7, "diningroom": 0.3, "house": 0.3}
+P_TILES_DEFAULT = 0.15
+# tile looks: ambientCG photo groups (floor = tile photos) or floor_tex.procedural_tiles (colours, brick offsets)
+TILE_LOOKS = [("floor", 0.5), ("procedural", 0.3), ("terrazzo", 0.1), ("marble", 0.05), ("stone", 0.05)]
+# size in m of one texture repeat on the floor, per group (as floor_tex.FloorTex.load); procedural: its own size
+TEX_SIZE_M = {"floor": (0.8, 3.0), "terrazzo": (0.6, 2.0), "marble": (0.8, 2.5), "stone": (1.0, 3.0),
+              "wood": (1.0, 3.0)}
+
+
+def floor_plan(fkind, room_type, rng):
+    """With floor textures: what the renderer does with a floor of family fkind (floor_kind) in a room of
+    room_type: "keep" (Infinigen's material), "tiles" or "wood" (an ambientCG / procedural material). Concrete is
+    kept as often as p_reject keeps it; carpet is replaced where p_reject would reject it."""
+    p_tiles = P_TILES.get(room_type, P_TILES_DEFAULT)
+    if fkind in ("tiles", "other"):
+        return "keep"
+    if fkind in ("concrete", "carpet") and rng.random() >= p_reject(fkind, room_type):
+        return "keep"
+    if fkind in ("concrete", "carpet"):
+        return "tiles" if rng.random() < p_tiles else "wood"
+    return "tiles" if rng.random() < p_tiles else "keep"   # wood
+
+
+def floor_look(plan, rng):
+    """(texture group or "procedural", repeat size m or None for procedural, roughness, rotation deg) of a
+    "tiles" / "wood" floor. Rotation: along the (axis-aligned) walls, 45 deg now and then for tiles."""
+    group = weighted(rng, TILE_LOOKS) if plan == "tiles" else "wood"
+    size = None if group == "procedural" else rng.uniform(*TEX_SIZE_M[group])
+    rough = rng.uniform(0.05, 0.45) if plan == "tiles" else rng.uniform(0.25, 0.6)   # glazed tiles reflect
+    rot = 45.0 if plan == "tiles" and rng.random() < 0.1 else rng.choice([0.0, 90.0])
+    return group, size, rough, rot
 
 
 def weighted(rng, items):

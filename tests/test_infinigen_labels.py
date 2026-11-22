@@ -139,8 +139,8 @@ def test_fisheye_polynomial_cannot_match_our_lens():
 def test_room_types_and_seeds_are_deterministic():
     a = [L.room_type(L.new_rng(0, r)) for r in range(300)]
     assert a == [L.room_type(L.new_rng(0, r)) for r in range(300)]
-    assert "house" not in a and set(a) == {"livingroom", "bedroom", "kitchen", "diningroom", "bathroom"}
-    assert a.count("livingroom") > a.count("diningroom")
+    assert set(a) == {"livingroom", "bedroom", "kitchen", "diningroom", "bathroom", "house"}
+    assert a.count("livingroom") > a.count("diningroom") and 0.08 < a.count("house") / len(a) < 0.2
     assert L.room_type(random.Random(1), {"house": 1.0}) == "house"
     name, rgb = L.wall_paint(random.Random(3))
     assert name in {n for n, _, _ in L.WALL_PALETTE} and all(0 <= c <= 1 for c in rgb)
@@ -161,6 +161,38 @@ def test_reject_carpet_in_wet_rooms_and_concrete_mostly():
     assert L.p_reject("concrete", "livingroom") == L.P_REJECT_CONCRETE
     assert L.p_reject("wood", "bathroom") == 0.0
     assert L.p_reject("tiles", "livingroom") == 0.0
+
+
+def test_floor_plan_replaces_instead_of_rejecting_and_makes_a_third_tiles():
+    rng = random.Random(0)
+    assert all(L.floor_plan(k, "bathroom", rng) == "keep" for k in ("tiles", "other") for _ in range(50))
+    # carpet never stays in wet rooms; replaced by tiles mostly there
+    plans = [L.floor_plan("carpet", "bathroom", rng) for _ in range(2000)]
+    assert "keep" not in plans and 0.75 < plans.count("tiles") / 2000 < 0.85
+    # concrete kept as often as before (1 - P_REJECT_CONCRETE), never rejected
+    plans = [L.floor_plan("concrete", "bedroom", rng) for _ in range(4000)]
+    assert abs(plans.count("keep") / 4000 - (1 - L.P_REJECT_CONCRETE)) < 0.02 and set(plans) <= {"keep", "tiles", "wood"}
+    # wood: tiles or kept
+    assert {L.floor_plan("wood", "kitchen", rng) for _ in range(200)} == {"keep", "tiles"}
+    # rooms drawn as the generator does, with the pilot's floor families (wood 86 %, concrete 8 %, carpet 6 % after
+    # the old rejection; before it about wood 60 %, concrete 25 %, carpet 15 %): about a third tiles
+    n, tiles = 0, 0
+    for r in range(6000):
+        rt = L.room_type(L.new_rng(0, r))
+        fk = L.weighted(rng, [("wood", 0.6), ("concrete", 0.25), ("carpet", 0.15)])
+        n, tiles = n + 1, tiles + (L.floor_plan(fk, rt, rng) == "tiles")
+    assert 0.28 < tiles / n < 0.45
+
+
+def test_floor_look():
+    rng = random.Random(1)
+    looks = [L.floor_look("tiles", rng) for _ in range(1000)]
+    groups = [g for g, _, _, _ in looks]
+    assert set(groups) == {g for g, _ in L.TILE_LOOKS} and groups.count("floor") > groups.count("procedural")
+    assert all((s is None) == (g == "procedural") for g, s, _, _ in looks)
+    assert all(0.05 <= r <= 0.45 and rot in (0.0, 90.0, 45.0) for _, _, r, rot in looks)
+    g, s, r, rot = L.floor_look("wood", rng)
+    assert g == "wood" and 1.0 <= s <= 3.0 and rot in (0.0, 90.0)
 
 
 def test_stats_line_is_what_train_reads():
