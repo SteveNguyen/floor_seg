@@ -66,10 +66,28 @@ def node_groups(mat):
     return [n.node_tree.name for n in mat.node_tree.nodes if n.bl_idname == "ShaderNodeGroup" and n.node_tree]
 
 
-def paint_material(mat, rgb, rng):
-    """Replace a material's nodes with a plain matte paint (subtle roller texture)."""
+def new_node_material(name):
+    """A new, empty node material. Infinigen's own materials are never edited: editing one in place changes the
+    original but not the evaluated copy the render uses (smoke test, room 1002), and clearing its group nodes
+    trips Blender's user counts. New materials go into the objects' slots instead (swap_materials)."""
+    m = bpy.data.materials.new(name)
+    m.use_nodes = True
+    m.node_tree.nodes.clear()
+    return m
+
+
+def swap_materials(objs, mapping):
+    """Put mapping[old name] in every material slot of objs that holds the old material."""
+    for o in objs:
+        for slot in o.material_slots:
+            if slot.material is not None and slot.material.name in mapping:
+                slot.material = mapping[slot.material.name]
+
+
+def paint_material(name, rgb, rng):
+    """A new plain matte paint material (subtle roller texture)."""
+    mat = new_node_material(name)
     nt = mat.node_tree
-    nt.nodes.clear()
     out = nt.nodes.new("ShaderNodeOutputMaterial")
     bsdf = nt.nodes.new("ShaderNodeBsdfPrincipled")
     bsdf.inputs["Base Color"].default_value = (*rgb, 1.0)
@@ -81,6 +99,7 @@ def paint_material(mat, rgb, rng):
     nt.links.new(noise.outputs["Fac"], bump.inputs["Height"])
     nt.links.new(bump.outputs["Normal"], bsdf.inputs["Normal"])
     nt.links.new(bsdf.outputs["BSDF"], out.inputs["Surface"])
+    return mat
 
 
 def plain_material(name, rgb, roughness):
@@ -92,12 +111,11 @@ def plain_material(name, rgb, roughness):
     return m
 
 
-def texture_floor_material(mat, img_path, size_m, roughness, rot_deg, rng):
-    """Replace a material's nodes (in place, like paint_material: Infinigen may set materials from geometry
-    nodes) with a colour image laid on the floor in world coordinates (x, y; one repeat = size_m), rotated by
-    rot_deg, a bump from the image's brightness (grout lines sink) and the given roughness."""
+def texture_floor_material(name, img_path, size_m, roughness, rot_deg, rng):
+    """A new floor material: a colour image laid on the floor in world coordinates (x, y; one repeat = size_m),
+    rotated by rot_deg, a bump from the image's brightness (grout lines sink) and the given roughness."""
+    mat = new_node_material(name)
     nt = mat.node_tree
-    nt.nodes.clear()
     out = nt.nodes.new("ShaderNodeOutputMaterial")
     bsdf = nt.nodes.new("ShaderNodeBsdfPrincipled")
     geo = nt.nodes.new("ShaderNodeNewGeometry")
@@ -120,6 +138,7 @@ def texture_floor_material(mat, img_path, size_m, roughness, rot_deg, rng):
     nt.links.new(bw.outputs["Val"], bump.inputs["Height"])
     nt.links.new(bump.outputs["Normal"], bsdf.inputs["Normal"])
     nt.links.new(bsdf.outputs["BSDF"], out.inputs["Surface"])
+    return mat
 
 
 def refloor(floors, kinds, room_type, tex_root, tmp_prefix, dg, rng):
@@ -145,10 +164,10 @@ def refloor(floors, kinds, room_type, tex_root, tmp_prefix, dg, rng):
             tmp.append(path)
         else:
             path = rng.choice(sorted(glob.glob(os.path.join(tex_root, group, "*.jpg"))))
-        for m in eval_materials(o, dg):
-            if m.node_tree and m.name not in done:   # a material shared by two floors: the first plan wins
-                texture_floor_material(m, path, size, rough, rot, rng)
-                done.add(m.name)
+        mapping = {m.name: texture_floor_material(f"floor_{plan}_{i}", path, size, rough, rot, rng)
+                   for m in eval_materials(o, dg) if m.name not in done}   # shared by two floors: first plan wins
+        swap_materials(floors, mapping)
+        done |= set(mapping)
         final.append(f"{plan}:{group}")
     return final, tmp
 
@@ -317,16 +336,21 @@ def main():
     if wall_mats and rng.random() < L.P_PAINT.get(args.room_type, L.P_PAINT_DEFAULT):
         paint = L.wall_paint(rng)
         accent = L.wall_paint(rng) if rng.random() < 0.2 else paint
-        for i, m in enumerate(sorted(wall_mats.values(), key=lambda m: m.name)):
-            paint_material(m, (paint if i == 0 else accent)[1], rng)
-        skirt_mats = {m.name: m for o in meshes if o.name.startswith("skirting") for m in eval_materials(o, dg)
-                      if m.node_tree}
+        swap_materials(walls, {m: paint_material(f"wall_paint_{i}", (paint if i == 0 else accent)[1], rng)
+                               for i, m in enumerate(sorted(wall_mats))})
+        skirts = [o for o in meshes if o.name.startswith("skirting")]
         style = L.weighted(rng, [("white", 0.5), ("wall", 0.3), ("keep", 0.2)])
-        for m in skirt_mats.values():
-            if style == "white":
-                paint_material(m, (0.85, 0.85, 0.84), rng)
-            elif style == "wall":
-                paint_material(m, tuple(c * 0.9 for c in paint[1]), rng)
+        if style != "keep":
+            rgb = (0.85, 0.85, 0.84) if style == "white" else tuple(c * 0.9 for c in paint[1])
+            swap_materials(skirts, {m.name: paint_material(f"skirt_paint_{i}", rgb, rng)
+                                    for i, m in enumerate({m.name: m for o in skirts
+                                                           for m in eval_materials(o, dg)}.values())})
+    # the render must see the new materials (a material set by geometry nodes would ignore the slots): check
+    dg = bpy.context.evaluated_depsgraph_get()
+    dg.update()
+    seen = {m.name for o in level for m in eval_materials(o, dg)}
+    if args.tex and floor_final != fkind and not all(n.startswith("floor_") for n in seen):
+        print(f"WARNING: floor material swap not effective, the floor renders with {sorted(seen)}", flush=True)
 
     # -- optional cables (floor by rule: lying on it, < 1 cm high)
     n_cables = rng.randint(1, 3) if rng.random() < args.cables else 0

@@ -5,14 +5,15 @@
 Prints, for the floor objects infinigen_render picks (flat, at floor level): material slots (link: object or
 data), data / evaluated materials, modifiers (geometry nodes, with any Set Material nodes); then the material
 on the face a ray from above actually hits (evaluated mesh, face material_index), before and after
-texture_floor_material is applied to the evaluated materials. Same for one wall (the paint).
+a new material from texture_floor_material is put in its slots (swap_materials, as the renderer does). Same for one wall (the paint).
 """
 import sys
 
 import bpy
 from mathutils import Vector
 
-from floor_seg.infinigen_render import NAME_SKIP, eval_materials, node_groups, texture_floor_material, world_bbox
+from floor_seg.infinigen_render import (NAME_SKIP, eval_materials, node_groups, swap_materials, texture_floor_material,
+                                        world_bbox)
 
 blend, tex_root = sys.argv[1], sys.argv[2]
 bpy.ops.wm.open_mainfile(filepath=blend)
@@ -68,10 +69,9 @@ import glob  # noqa: E402
 import random  # noqa: E402
 
 path = sorted(glob.glob(tex_root + "/floor/*.jpg"))[0]
-for m in eval_materials(o, dg):
-    if m.node_tree:
-        texture_floor_material(m, path, 1.0, 0.2, 0.0, random.Random(0))
-        print("  textured", m.name, "->", len(m.node_tree.nodes), "nodes")
+new = texture_floor_material("floor_debug", path, 1.0, 0.2, 0.0, random.Random(0))
+swap_materials([o], {m.name: new for m in eval_materials(o, dg)})
+print("  slots now:", [(s.link, s.material.name) for s in o.material_slots])
 dg = bpy.context.evaluated_depsgraph_get()
 dg.update()
 print("  ray hit after:", hit_material(o))

@@ -95,7 +95,7 @@ def run(args):
             t1 = time.time()
             r = subprocess.run(cmd, cwd=REPO, env=env, capture_output=True, text=True, timeout=args.timeout)
             t_render = time.time() - t1
-            log = [s for s in r.stdout.splitlines() if s.startswith(("room", "  r", "reject", "no floor", "floors"))]
+            log = [s for s in r.stdout.splitlines() if s.startswith(("room", "  r", "reject", "no floor", "floors", "WARNING"))]
             print("\n".join(log) or r.stdout[-1500:], flush=True)
             if not args.keep_blend:
                 shutil.rmtree(work, ignore_errors=True)
