@@ -152,6 +152,11 @@ def test_floor_kind_from_node_groups():
     assert L.floor_kind(["brick_concrete"]) == "concrete"
     assert L.floor_kind(["tile_indoor_ground", "concrete_layer"]) == "tiles"
     assert L.floor_kind([]) == "other"
+    # smoke test 2026-11-22: Infinigen tile floors without 'tile' in their node groups
+    assert L.floor_kind(["brick_concrete", "ceramic", "hexagon"]) == "tiles"
+    assert L.floor_kind(["brick_concrete", "spanish_bound"]) == "tiles"
+    assert L.floor_kind(["brick_cutter", "wood_grain_generator", "wood_planks_grain_colors", "wood_shader"]) == "wood"
+    assert L.floor_kind(["wood_shader", "herringbone"]) == "wood"
 
 
 def test_reject_carpet_in_wet_rooms_and_concrete_mostly():

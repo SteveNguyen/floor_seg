@@ -139,11 +139,18 @@ def wall_paint(rng):
     return name, tuple(float(v) for v in np.clip(c, 0, 1))
 
 
+TILE_KEYS = ("tile", "ceramic", "hexagon", "spanish", "herringbone", "basket", "checker", "shell", "star",
+             "triangle", "square", "mosaic", "terrazzo", "marble")
+
+
 def floor_kind(group_names):
     """Floor material family from the material's node-group names (Infinigen's procedural shaders)."""
     s = " ".join(group_names).lower()
-    for kind, keys in (("carpet", ("carpet",)), ("tiles", ("tile",)), ("wood", ("wood", "plank")),
-                       ("concrete", ("concrete",))):
+    # Infinigen's tile floors are named by their pattern (hexagon, spanish_bound, ...) with a shared
+    # 'brick_concrete' helper: smoke test 2026-11-22, 'brick_concrete ceramic hexagon' was a hexagonal tile floor.
+    # Wood first: a herringbone parquet is wood.
+    for kind, keys in (("carpet", ("carpet",)), ("wood", ("wood", "plank")),
+                       ("tiles", TILE_KEYS), ("concrete", ("concrete",))):
         if any(k in s for k in keys):
             return kind
     return "other"
