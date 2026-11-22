@@ -40,10 +40,10 @@ def describe(o):
           sorted({g for m in eval_materials(o, dg) for g in node_groups(m)})[:8])
     for md in o.modifiers:
         setm = []
-        if md.type == "NODES" and md.node_group:
+        if md.type == "NODES" and getattr(md, "node_group", None):
             setm = [(n.name, n.inputs["Material"].default_value.name if n.inputs["Material"].default_value else None)
                     for n in md.node_group.nodes if n.bl_idname == "GeometryNodeSetMaterial"]
-        print("  modifier:", md.type, md.name, getattr(md.node_group, "name", None), "SetMaterial:", setm)
+        print("  modifier:", md.type, md.name, getattr(getattr(md, "node_group", None), "name", None), "SetMaterial:", setm)
 
 
 def hit_material(o):
