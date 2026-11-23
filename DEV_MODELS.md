@@ -10,7 +10,8 @@ Development models for the Reachy Mini floor segmentation (code: the `floor_seg`
 versions, not a release. Each folder holds `best.pt` (state dict, chosen by synthetic val floor IoU),
 `last.pt`, `floor.onnx` (export of `best.pt`) and `metrics.jsonl` (one line per epoch).
 
-**Current choice for navigation: `v7_floor_under`**, floor cutoff 0.7, under cutoff 0.5.
+**Current choice for navigation: `v10b_infinigen2`**, floor cutoff 0.7, under cutoff 0.5 (see its section at the
+end; before it, `v7_floor_under`, then `v10a`, local only).
 
 ## Render sets (training data, `floor_seg.thor_render`, ProcTHOR-10K houses)
 
@@ -203,3 +204,38 @@ the plinth frames +0.006 [-0.001, +0.013]. The first synthetic change that beats
 gain over v9b is plinths (false floor on them 7.6 -> 1.2 %). Worse frames: the tiled hallway run (172522, -0.005
 vs v9b), far floor beyond a doorway missed, a flat bag strap called floor. With 720 training views from 146 rooms,
 the next test is more Infinigen rooms.
+
+## v10b (`v10b_infinigen2`): v10a + Infinigen v2; current choice
+
+infinigen_v2 = `scripts/infinigen_gen.py --tex` (docs/INFINIGEN.md), 1000 rooms x 5 views on the RTX 5090 (3 shards,
+~7.5 h): 4,982 views from 998 rooms (130 furnished houses with doors and thresholds). Floors re-materialled where
+Infinigen's pick is unusual: tiles of many patterns (plain, procedural, terrazzo, stone, marble), wood, carpet
+(bedrooms and living rooms only), some concrete. 73 % of views show at least one threshold, 30 % cables. v10a's
+data plus infinigen_v2 twice per epoch (29,702 training views per epoch), but NOT quite v10a's recipe: the run
+left out `--aug-p-level 0 --aug-p-threshold 0`, so the 2D level changes (0.2) and threshold strips (0.3) of
+`aug_structures` were on at their defaults (off for v9b / v10a). Two changes at once: the gains below cannot be
+split between Infinigen v2 and those augmentations.
+
+```bash
+python -m floor_seg.train --data data/synth/thor_v1 data/synth/thor_v4 data/synth/infinigen_v1 data/synth/infinigen_v2 \
+    --repeat 1 1 4 2 --kinds floor --out models/floor_v10b_infinigen2 --tex data/textures/ambientcg --under \
+    --aug-structures
+```
+
+Synthetic val floor IoU 0.9441 (val now includes the Infinigen v2 rooms: not comparable with v10a). Real test set
+(75 frames), cutoff 0.5: floor IoU 0.962 (false floor 1.8 %, missed 2.2 %), equal to v10a: paired +0.000
+[-0.006, +0.007], 6 frames better / 8 worse. By group: plinth 0.962, passage 0.968, doorstep 0.950, ordinary
+0.969 (v10a 0.976: -0.007 [-0.015, -0.001]), doorstep_rough 0.945, blocked 0.973.
+
+Doorstep set (16 more hand-labelled frames from the robot's own runs at two doorways where v10a stopped: a
+flooring change at a door with a low threshold; private), floor IoU, false / missed floor:
+
+| Cutoff | v7 | v10a | v10b |
+|---|---|---|---|
+| 0.5 | 0.846 (2.8 / 13.6 %) | 0.884 (2.6 / 9.9 %) | **0.958** (3.3 / 1.8 %) |
+| 0.7 (navigation) | 0.786 (1.6 / 20.4 %) | 0.848 (1.3 / 14.4 %) | **0.954** (1.9 / 3.3 %) |
+
+Paired v10a -> v10b over the 16 frames: +0.074 [+0.036, +0.119], 11 better / 0 worse (sign test p < 0.01). 14 of
+the 16 frames are from one run and the same two doorways: a large gain there, not yet shown on other doorways.
+The cost: slightly more false floor (75 frames at 0.7: 0.7 -> 1.0 %), as thin bands at object bases and a few
+far patches. Chosen for navigation: the doorway stops were the main failure of v10a on the robot.
