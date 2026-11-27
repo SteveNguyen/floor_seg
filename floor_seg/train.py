@@ -209,7 +209,8 @@ def struct_aug(args):
         return None
     cfg = StructAugCfg(p_plinth=args.aug_p_plinth, p_threshold=args.aug_p_threshold, p_level=args.aug_p_level,
                        p_sun=args.aug_p_sun, p_specular=args.aug_p_specular, p_wall_tiles=args.aug_p_wall_tiles,
-                       p_plinth_render=args.aug_p_plinth_render, p_door_threshold=args.aug_p_door_threshold)
+                       p_plinth_render=args.aug_p_plinth_render, p_door_threshold=args.aug_p_door_threshold,
+                       p_bright_step=args.aug_p_bright_step)
     return StructAug(cfg, args.calib)
 
 
@@ -243,6 +244,8 @@ def build_parser():
     ap.add_argument("--aug-p-level", type=float, default=d.p_level, help="step up / down beyond an edge")
     ap.add_argument("--aug-p-sun", type=float, default=d.p_sun, help="with --aug-structures")
     ap.add_argument("--aug-p-specular", type=float, default=d.p_specular, help="with --aug-structures")
+    ap.add_argument("--aug-p-bright-step", type=float, default=d.p_bright_step,
+                    help="with --aug-structures: everything beyond a line on the floor brighter (a daylit next room)")
     return ap
 
 

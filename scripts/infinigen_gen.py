@@ -92,6 +92,8 @@ def run(args):
             if args.no_under:
                 cmd.append("--no-under")
             cmd += ["--under-step", str(args.under_step)]
+            if args.cross_door:
+                cmd += ["--cross-door", str(args.cross_door), "--far-bright", str(args.far_bright)]
             t1 = time.time()
             r = subprocess.run(cmd, cwd=REPO, env=env, capture_output=True, text=True, timeout=args.timeout)
             t_render = time.time() - t1
@@ -140,6 +142,11 @@ def main():
                         "shards share one machine")
     r.add_argument("--no-under", action="store_true", help="no _under.png")
     r.add_argument("--under-step", type=int, default=1, help="measure every n-th 2 cm cell of the under map")
+    r.add_argument("--cross-door", type=float, default=0.0,
+                   help="chance per view of a view across a doorway into the next room, the two floors made "
+                        "different (houses only: use with --room-weights house=1; needs --tex)")
+    r.add_argument("--far-bright", type=float, default=0.0,
+                   help="with --cross-door: chance per such view that the far room is lit brighter")
     r.add_argument("--overlay", action="store_true", help="also write <name>_overlay.jpg (QA)")
     r.add_argument("--keep-blend", action="store_true")
     m = sub.add_parser("merge")

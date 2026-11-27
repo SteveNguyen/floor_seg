@@ -68,6 +68,17 @@ index % 10 == 0 are the validation split), `kind` = floor, camera `h`, `pitch`, 
 - **Optional additions** (driver flags, defaults below): `--cables 0.3` (chance per room of 1-3 cables, 2-4 mm
   radius, lying on the floor: floor), `--thresholds 0.5` (chance per door of a flush strip 4-12 mm high, 4-10 cm
   deep, across the door: floor).
+- **Cross-door views** (infinigen_v3; `--cross-door P --far-bright Q`, off by default; houses only, needs `--tex`):
+  the real doorways come from Infinigen's `door_affordance_collider` helper boxes (one per doorway, centred on
+  its centre line, where the two rooms' floors meet); the boxes are then removed (hidden in the render but not in
+  `scene.ray_cast`: they blocked cameras near doorways and the ray-grid preview through them). One doorway per
+  house is the target: its floor on one side becomes tiles, beyond it wood (60 %) or other tiles (40 %), each
+  floor with its own material. A view is cross-door with chance P: camera 0.5-2.5 m before the doorway (on the
+  tiled side 75 %), up to 0.4 m off its axis, facing a point of the doorway +-10 deg, height / pitch / roll as
+  usual; kept if >= 3 % of the preview rays meet floor beyond the doorway. Threshold strips (`--thresholds`) go
+  on the real doorways' centre lines. With chance Q per such view the far room's lamps are x 2.5-5 and a 1.5 m
+  ceiling area light 1 m into it adds (gain - 1) x their power (>= 20 W). stats.jsonl adds `near_floor`,
+  `far_floor`, `far_gain` (0 = off) and `far_near_lum` (measured far / near floor brightness, QA).
 
 ## Install on a GPU machine
 
@@ -85,7 +96,9 @@ git clone <floor_seg repo> ~/floor_seg && git -C ~/floor_seg checkout infinigen
 ## Generate the pilot set (~1,000 images: 200 rooms x 5 views)
 
 One process per GPU, sharded by room index; re-running skips finished rooms. infinigen_v2 (1,000 rooms) is the
-same with `--out data/synth/infinigen_v2 --rooms 1000 --tex data/textures/ambientcg`:
+same with `--out data/synth/infinigen_v2 --rooms 1000 --tex data/textures/ambientcg`; infinigen_v3 (cross-door
+houses) adds `--first 2000 --room-weights house=1 --cross-door 0.8 --far-bright 0.5 --thresholds 0.7
+--under-step 2` (rooms 2000+: seeds and validation split distinct from v1 / v2):
 
 ```bash
 cd ~/floor_seg

@@ -65,6 +65,9 @@ in the camera-yaw frame is (gx right, gz forward, height above the floor), all l
              parallelogram and a soft additive glare blob; these add the saturated, striped and reflection-shaped
              cases that failed on dark shiny tiles, and work without --tex. Off by default (p_sun = p_specular =
              0): with them, v8 called bright white wall bases and plinths floor on real frames.
+  bright     exposure step: everything beyond a line on the floor (the strip's / level edge's, a real doorway, or
+             random) brighter (gain 1.3-2.5 in linear light, soft edge), walls beyond included: a daylit corridor
+             seen across a doorway from a dim room. Labels unchanged. Off by default (p_bright_step = 0).
 
 Labels: only level changes (real steps) change labels (floor -> obstacle). 'under' pixels (train.UNDER) are
 never painted (no strip, plinth, step or light under a bed); beyond a non-drivable level edge they become obstacle
@@ -137,6 +140,13 @@ class StructAugCfg:
     # plinths floor on real frames. Kept for experiments (train.py --aug-p-sun / --aug-p-specular).
     p_sun: float = 0.0
     p_specular: float = 0.0
+    # brightness step: everything beyond a line on the floor (floor, walls, objects: the next room) brighter, as a
+    # daylit corridor seen across a doorway from a dim room (v10b called such a corridor floor not floor). Labels
+    # unchanged. Off by default (train.py --aug-p-bright-step); with 0 no random number is drawn, so the other
+    # augmentations' draws (and v10b's training stream) are unchanged.
+    p_bright_step: float = 0.0
+    bright_gain: tuple = (1.3, 2.5)      # exposure gain beyond the line (applied in linear light)
+    bright_edge_px: tuple = (1.0, 4.0)   # px, Gaussian sigma of the soft edge
 
 
 def lens_K_D(calib_path):
@@ -255,6 +265,7 @@ class StructAug:
         # decisions drawn up front: the probability of each augmentation does not depend on the others
         p_thr = c.p_threshold if doorways is None else c.p_door_threshold
         do = [rng.random() < p for p in (c.p_plinth, p_thr, c.p_level, c.p_sun, c.p_specular, c.p_wall_tiles)]
+        do_bright = c.p_bright_step > 0 and rng.random() < c.p_bright_step   # drawn only when on (see cfg)
         rendered = plinth is not None and bool(plinth.any())
         if rendered:  # the render has its own plinths (walls only): recolour them; no painted plinth / wall tiles
             if rng.random() < c.p_plinth_render:
@@ -269,6 +280,8 @@ class StructAug:
         if do[2]:
             info["level"] = self.level(img, lab, geo, free, rng)
             free &= lab != 0                                  # floor beyond a step is no longer floor
+        if do_bright:   # after the strip / level change: it reuses their edge when there is one
+            info["bright_step"] = self.bright_step(img, geo, free, rng, info, doorways)
         if do[3]:
             info["sun"] = self.sun(img, free, geo, rng)
         if do[4]:
@@ -723,6 +736,40 @@ class StructAug:
         return info
 
     # ---------------------------------------------------------------- light
+    def bright_step(self, img, geo, free, rng, info, doorways=None):
+        """Exposure step across a line on the floor: every pixel whose 3D point lies beyond the line (floor, and
+        the walls / objects standing beyond it: the next room, not just its floor, so "bright" does not come to
+        mean "floor") gets a gain in linear light, with a soft image-space edge. The line is the threshold strip's
+        far side or the level edge painted in this image, else a real doorway (renders that list them), else a
+        random line as the strips' (edge()). Beyond = across coordinate (edge() convention: normal pointing away
+        from the camera) of the pixel's 3D point > the line's; the wall around a doorway is on the near side (its
+        face is half a wall thickness before the doorway's centre line), so only the view through the door
+        brightens. Labels unchanged."""
+        c = self.cfg
+        thr, lv = info.get("threshold"), info.get("level")
+        if thr:
+            th, ve = thr["th"], thr["v1"]
+        elif lv:
+            th, ve = lv["th"], lv["ve"]
+        elif doorways:
+            _, ve, th, _, _, _ = self.door_edge(geo, rng.choice(doorways))
+        else:
+            ys, xs = np.nonzero(free & (geo.gz > c.thr_dist[0]) & (geo.gz < c.thr_dist[1]))
+            if len(ys) < 50:
+                return None
+            _, ve, th, _, _ = self.edge(geo, ys, xs, rng)
+        across = -math.sin(th) * geo.gx + math.cos(th) * geo.gz
+        beyond = geo.valid & (across > ve)
+        if (beyond & free).sum() < 300:                   # too little floor beyond: no visible step on the floor
+            return None
+        soft = cv2.GaussianBlur(beyond.astype(np.float32), (0, 0), rng.uniform(*c.bright_edge_px))[..., None]
+        gain = rng.uniform(*c.bright_gain)
+        tint = np.array([rng.uniform(0.92, 1.08) for _ in range(3)], np.float32)   # daylight vs lamp colour
+        m = soft[..., 0] > 1e-3          # pixels the step reaches (others untouched: no gamma round-trip error)
+        lin = np.clip(img[m], 0, 1) ** 2.2
+        img[m] = np.clip(lin * (1 + (gain * tint - 1) * soft[m]), 0, 1) ** (1 / 2.2)
+        return {"gain": gain, "th": th, "ve": ve, "px": int((soft[..., 0] > 0.5).sum())}
+
     def sun(self, img, free, geo, rng):
         """Window light on the floor (m): a sheared rectangle split into panes by mullion shadows, or into thin
         slats (blinds); overexposed (gain + additive warm light: dark tiles saturate too); soft edges."""

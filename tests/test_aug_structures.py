@@ -4,6 +4,7 @@ import math
 import random
 from dataclasses import replace
 
+import cv2
 import numpy as np
 import pytest
 
@@ -321,6 +322,42 @@ def test_light_keeps_labels_and_spares_under_and_walls(sa, scene):
     assert (label[painted] == 1).all()
 
 
+def test_bright_step_beyond_the_line_labels_unchanged(sa, scene):
+    bgr, label, _ = scene
+    for seed in range(4):
+        img, lab, info = run(sa, scene, seed=seed, p_bright_step=1.0)
+        b = info["bright_step"]
+        assert b and 1.3 <= b["gain"] <= 2.5
+        assert np.array_equal(lab, label)                     # labels unchanged
+        g = geom(sa, scene)
+        across = -math.sin(b["th"]) * g.gx + math.cos(b["th"]) * g.gz
+        lum0, lum1 = bgr.astype(np.float32).mean(2), img.astype(np.float32).mean(2)
+        beyond = (g.valid & (across > b["ve"])).astype(np.uint8)
+        # the soft edge (Gaussian, sigma <= 4 px: kernel radius 16 px) changes pixels up to 16 px across the line
+        k = np.ones((41, 41), np.uint8)
+        ring = (cv2.dilate(beyond, k) > 0) & ~(cv2.erode(beyond, k) > 0)
+        far, near = (beyond > 0) & ~ring, (beyond == 0) & ~ring
+        # beyond the line: brighter, floor and wall alike (not a "bright = floor" cue); before it: untouched
+        for sel in (far & (label == 1), far & (label == 0)):
+            if sel.sum() > 50:
+                assert (lum1[sel] > lum0[sel] + 5).mean() > 0.95
+        assert (far & (label == 1)).sum() > 300
+        assert np.array_equal(img[near], bgr[near])
+
+
+def test_bright_step_reuses_the_strip_edge(sa, scene):
+    _, _, info = run(sa, scene, seed=1, p_threshold=1.0, p_transition=0.0, p_bright_step=1.0)
+    t, b = info["threshold"], info["bright_step"]
+    assert t and b and (b["th"], b["ve"]) == (t["th"], t["v1"])   # brighter beyond the strip's far side
+
+
+def test_bright_step_off_draws_nothing(sa, scene):
+    # p_bright_step = 0 (default) consumes no random number: the other augmentations come out as before
+    full = dict(p_threshold=1.0, p_level=1.0, p_sun=1.0)
+    a, b = run(sa, scene, seed=4, **full), run(sa, scene, seed=4, p_bright_step=0.0, **full)
+    assert np.array_equal(a[0], b[0]) and "bright_step" not in b[2]
+
+
 def test_under_pixels_never_painted(sa, scene):
     bgr, label, _ = scene
     under = label == UNDER
@@ -351,6 +388,9 @@ def test_off_by_default(renders):
     assert all(d.saug is None for d in tr.datasets)
     on = build_parser().parse_args(["--data", "d", "--out", "x", "--aug-structures", "--aug-p-level", "0.5"])
     assert struct_aug(on).cfg.p_level == 0.5 and struct_aug(on).cfg.p_plinth == StructAugCfg().p_plinth
+    assert struct_aug(on).cfg.p_bright_step == 0.0
+    br = build_parser().parse_args(["--data", "d", "--out", "x", "--aug-structures", "--aug-p-bright-step", "0.3"])
+    assert struct_aug(br).cfg.p_bright_step == 0.3
     # run A of the v9 plan: no plinth, no wall tiles (sun / specular off by default)
     a = struct_aug(build_parser().parse_args(["--data", "d", "--out", "x", "--aug-structures", "--aug-p-plinth", "0",
                                               "--aug-p-wall-tiles", "0"])).cfg

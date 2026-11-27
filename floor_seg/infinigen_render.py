@@ -15,6 +15,8 @@ Per scene:
   plain concrete or carpet is rejected (exit code 3, the driver regenerates) with infinigen_labels.p_reject.
   Walls are repainted with an ordinary paint (white, cream, beige, grey, soft pastel) with P_PAINT per room type, and the skirting board then mostly white or the wall colour.
 - optional: cables lying on the floor (--cables) and flush door threshold strips (--thresholds), both floor.
+- optional (--cross-door, houses): views across one doorway into the next room, its two floors made different
+  (tiles on one side), threshold strips on the real doorways; --far-bright: the far room lit brighter.
 - K cameras: collision-free (rays around the robot's footprint), 0.25-0.40 m above the floor, pitch 5-25 deg
   down, roll +-3 deg; yaw toward furniture / objects 40 %, toward a wall 30 %, random 30 %; a ray grid checks
   that enough floor is visible before rendering.
@@ -141,18 +143,20 @@ def texture_floor_material(name, img_path, size_m, roughness, rot_deg, rng):
     return mat
 
 
-def refloor(floors, kinds, room_type, tex_root, tmp_prefix, dg, rng):
+def refloor(floors, kinds, room_type, tex_root, tmp_prefix, dg, rng, force=None):
     """Re-material each floor object with infinigen_labels.floor_plan (kinds: its floor family). Returns the
     final family per floor ("carpet", "tiles:floor", "tiles:procedural", "wood:wood", ...) and the temporary
-    procedural texture files (deleted by the caller after the renders)."""
+    procedural texture files (deleted by the caller after the renders). force: floor object name -> plan
+    ("tiles" / "wood") for floors that must get that plan and a material of their own (--cross-door)."""
     import glob
 
     from floor_seg.floor_tex import procedural_tiles
 
+    force = force or {}
     final, tmp, done = [], [], set()
     os.makedirs(os.path.dirname(tmp_prefix), exist_ok=True)
     for i, (o, fkind) in enumerate(zip(floors, kinds)):
-        plan = L.floor_plan(fkind, room_type, rng)
+        plan = force.get(o.name) or L.floor_plan(fkind, room_type, rng)
         if plan == "keep":
             final.append(fkind)
             continue
@@ -164,12 +168,45 @@ def refloor(floors, kinds, room_type, tex_root, tmp_prefix, dg, rng):
             tmp.append(path)
         else:
             path = rng.choice(sorted(glob.glob(os.path.join(tex_root, group, "*.jpg"))))
+        if o.name in force:   # its own material in all its slots (a material shared with the other room's floor
+            mat = texture_floor_material(f"floor_{plan}_{i}", path, size, rough, rot, rng)   # stays there)
+            for slot in o.material_slots:
+                slot.material = mat
+            final.append(f"{plan}:{group}")
+            continue
         mapping = {m.name: texture_floor_material(f"floor_{plan}_{i}", path, size, rough, rot, rng)
                    for m in eval_materials(o, dg) if m.name not in done}   # shared by two floors: first plan wins
         swap_materials(floors, mapping)
         done |= set(mapping)
         final.append(f"{plan}:{group}")
     return final, tmp
+
+
+def floor_at(scene, dg, x, y, floor_z, names):
+    """Name of the floor object (one of names) at (x, y): a short ray UP from 0.3 m below the floor plane (nothing
+    stands below the floor, unlike a ray down that may meet a door leaf or furniture), or None."""
+    hit = scene.ray_cast(dg, Vector((x, y, floor_z - 0.3)), Vector((0, 0, 1)), distance=0.31)
+    name = hit[4].original.name if hit[0] and hit[4] is not None else None
+    return name if name in names else None
+
+
+def find_doorways(scene, dg, floor_z, names):
+    """Doorways between two rooms of a house, from Infinigen's door_affordance_collider helper boxes (hidden in the
+    render, one per doorway, centred on the doorway's centre line in the wall; local x = the wall normal, 1.6 m
+    long; local y = along the wall, the door width; Infinigen 2 house_walls_rand). The two rooms' floors meet on
+    that centre line (smoke test, house seed 777). Returns [(centre, normal, along, width, floor_a, floor_b)]
+    (2-D Vectors, m; floor_a on the -normal side, floor_b on the +normal side), only doorways with a floor of
+    `names` on both sides, two different floor objects."""
+    out = []
+    for o in scene.objects:
+        if "door_affordance_collider" not in o.name:
+            continue
+        mw = o.matrix_world
+        c, n, a = mw.translation.to_2d(), mw.col[0].to_2d().normalized(), mw.col[1].to_2d().normalized()
+        sides = [floor_at(scene, dg, *(c + n * s), floor_z, names) for s in (-0.3, 0.3)]
+        if None not in sides and sides[0] != sides[1]:
+            out.append((c, n, a, o.dimensions.y, *sides))
+    return out
 
 
 def setup_gpu(scene):
@@ -277,7 +314,16 @@ def main():
     ap.add_argument("--no-under", action="store_true", help="no _under.png (no upward ray casts)")
     ap.add_argument("--under-step", type=int, default=1,
                     help="measure every n-th 2 cm cell of the under map (the rest: nearest measured cell)")
+    ap.add_argument("--cross-door", type=float, default=0.0,
+                    help="chance per view of a view across a doorway into the next room (houses; needs --tex): "
+                         "camera 0.5-2.5 m before one doorway, facing it; that doorway's two floors forced "
+                         "different (tiles on one side, wood / other tiles beyond); thresholds on the real doorways")
+    ap.add_argument("--far-bright", type=float, default=0.0,
+                    help="with --cross-door: chance per cross-door view that the room beyond is lit brighter "
+                         "(its lamps x 2.5-5 and a ceiling area light)")
     args = ap.parse_args(sys.argv[1:])
+    if args.cross_door and not args.tex:
+        ap.error("--cross-door needs --tex (the two floors are re-materialled)")
     rng = L.new_rng(args.seed, args.room)
     t0 = time.time()
 
@@ -313,6 +359,23 @@ def main():
     fx0, fx1 = min(boxes[o.name][0] for o in level), max(boxes[o.name][1] for o in level)
     fy0, fy1 = min(boxes[o.name][2] for o in level), max(boxes[o.name][3] for o in level)
 
+    # -- cross-door views (--cross-door): the house's doorways, one of them the target of those views. Its floors:
+    # tiles on one side (the side the camera is on 75 % of the time), wood or other tiles beyond.
+    doorways, door, force = [], None, {}
+    if args.cross_door > 0:
+        doorways = find_doorways(scene, dg, floor_z, {o.name for o in level})
+        # the helper boxes are hidden in the render but not in scene.ray_cast: they would block cameras near a
+        # doorway and the ray-grid preview through it (1.6 m deep): removed
+        for o in [o for o in scene.objects if "door_affordance_collider" in o.name]:
+            bpy.data.objects.remove(o, do_unlink=True)
+        dg = bpy.context.evaluated_depsgraph_get()
+        dg.update()
+        if doorways:
+            door = rng.choice(doorways)
+            tiles_side = rng.choice(door[4:6])
+            other_side = door[5] if tiles_side == door[4] else door[4]
+            force = {tiles_side: "tiles", other_side: L.weighted(rng, [("wood", 0.6), ("tiles", 0.4)])}
+
     # -- ordinary-home bias: floor family, wall paint, skirting colour
     groups = [[g for m in eval_materials(o, dg) for g in node_groups(m)] for o in level]
     kinds = [L.floor_kind(g) for g in groups]
@@ -321,8 +384,9 @@ def main():
     tmp_tex = []
     if args.tex:
         finals, tmp_tex = refloor(level, kinds, args.room_type, args.tex,
-                                  os.path.join(args.out, "rooms", f"r{args.room:05d}"), dg, rng)
+                                  os.path.join(args.out, "rooms", f"r{args.room:05d}"), dg, rng, force)
         floor_final = finals[0]
+        final_of = {o.name: f for o, f in zip(level, finals)}
     else:
         if not args.no_reject and rng.random() < L.p_reject(fkind, args.room_type):
             print(f"reject: {fkind} floor", flush=True)
@@ -381,7 +445,22 @@ def main():
              and min(boxes[o.name][1] - boxes[o.name][0], boxes[o.name][3] - boxes[o.name][2]) < 0.25
              and 0.6 < max(boxes[o.name][1] - boxes[o.name][0], boxes[o.name][3] - boxes[o.name][2]) < 1.4]
     seen = set()
-    for o in doors:
+    # with --cross-door the real doorways are known: strips on their centre line (where the two floors meet),
+    # along the wall, door-wide; the door-leaf boxes below are not used then (an open leaf's box is not the doorway)
+    for c, _, a, width, _, _ in doorways:
+        if rng.random() >= args.thresholds:
+            continue
+        depth, height = rng.uniform(0.04, 0.10), rng.uniform(0.004, 0.012)
+        bpy.ops.mesh.primitive_cube_add(size=1.0, location=(c.x, c.y, floor_z + height / 2))
+        st = bpy.context.active_object
+        st.name = f"threshold_{n_thr}"
+        st.rotation_euler = (0.0, 0.0, math.atan2(a.y, a.x))   # local x along the doorway
+        st.scale = (width, depth, height)
+        col = rng.choice([(0.35, 0.22, 0.12), (0.6, 0.6, 0.6), (0.7, 0.7, 0.68), (0.15, 0.12, 0.1)])
+        st.data.materials.append(plain_material(f"threshold_mat_{n_thr}", col, rng.uniform(0.2, 0.6)))
+        st.pass_index = L.IDX_FLAT
+        n_thr += 1
+    for o in [] if doorways else doors:
         x0, x1, y0, y1 = boxes[o.name][:4]
         key = (round((x0 + x1) / 2, 1), round((y0 + y1) / 2, 1))
         if key in seen or rng.random() >= args.thresholds:
@@ -431,16 +510,46 @@ def main():
     targets = [((b[0] + b[1]) / 2, (b[2] + b[3]) / 2) for o, b in ((o, boxes[o.name]) for o in meshes)
                if o.pass_index == L.IDX_OTHER and b[4] < 0.1 and 0.1 < b[5] < 1.5 and o not in walls]
     grid = L.pinhole_dirs(wr, hr, f, step=max(wr // 32, 1))
+    # --far-bright: the lamps of each of the target doorway's two rooms (floor below the lamp; not the sun, not
+    # the window portals) and one ceiling area light moved into the far room per view, off (energy 0) otherwise
+    lamps, far_light = {}, None
+    if door is not None and args.far_bright > 0:
+        for o in scene.objects:
+            if o.type == "LIGHT" and o.data.type != "SUN" and not getattr(o.data.cycles, "is_portal", False):
+                fl = floor_at(scene, dg, o.matrix_world.translation.x, o.matrix_world.translation.y, floor_z,
+                              set(door[4:6]))
+                if fl:
+                    lamps.setdefault(fl, []).append((o, o.data.energy))
+        ld = bpy.data.lights.new("far_light", "AREA")
+        ld.size, ld.energy, ld.color = 1.5, 0.0, (0.95, 0.97, 1.0)   # emits down (-z), daylight-ish
+        far_light = bpy.data.objects.new("far_light", ld)
+        scene.collection.objects.link(far_light)
     os.makedirs(os.path.join(args.out, "rooms"), exist_ok=True)
     lines, k, tries, n_heavy = [], 0, 0, 0
     print(f"room {args.room} {args.room_type}: floor {fkind} -> {floor_final}, paint {paint and paint[0]}, "
           f"cables {n_cables}, "
           f"thresholds {n_thr}, render {wr}x{hr}, {device}, under map {t_under:.1f} s"
-          f"{f' ({um.grid.mean():.0%} of the room)' if um else ''}, setup {time.time() - t0:.1f} s", flush=True)
+          f"{f' ({um.grid.mean():.0%} of the room)' if um else ''}, setup {time.time() - t0:.1f} s"
+          f"{f', doorways {len(doorways)}, cross-door floors {force}' if args.cross_door else ''}", flush=True)
     while k < args.views and tries < 40 * args.views:
         tries += 1
+        cross = door is not None and rng.random() < args.cross_door
         x, y, yaw, h, pitch, roll = L.sample_pose(rng, (fx0 + 0.3, fx1 - 0.3, fy0 + 0.3, fy1 - 0.3))
-        mode = L.weighted(rng, [("object", 0.4), ("wall", 0.3), ("random", 0.3)])
+        if cross:   # robot 0.5-2.5 m before the doorway, roughly facing it (height, pitch, roll as sampled)
+            mode = "door"
+            c, nrm, a, width, fa, fb = door
+            near = tiles_side if rng.random() < 0.75 else other_side
+            far = fb if near == fa else fa
+            nn = nrm if near == fa else -nrm            # from the near room into the far room
+            dist = rng.uniform(0.5, 2.5)
+            p = c - nn * dist + a * (rng.uniform(-1, 1) * min(0.4, 0.3 * dist))   # up to 0.4 m off the axis
+            tgt = c + a * (rng.uniform(-0.25, 0.25) * width)                       # a point of the doorway
+            x, y = p.x, p.y
+            yaw = L.yaw_toward(x, y, tgt.x, tgt.y) + rng.uniform(-10, 10)
+            if floor_at(scene, dg, x, y, floor_z, {near}) is None:   # the near room is shorter than dist
+                continue
+        else:
+            mode = L.weighted(rng, [("object", 0.4), ("wall", 0.3), ("random", 0.3)])
         if mode == "object" and targets:
             tx, ty = rng.choice(targets)
             if 0.6 < math.hypot(tx - x, ty - y) < 4.0:
@@ -484,7 +593,7 @@ def main():
                 yaw = best[1] + rng.uniform(-30, 30)
         axes = L.camera_axes(yaw, pitch, roll)
         # ray-grid preview: enough floor, not staring at a wall
-        n_floor = n_near = n = 0
+        n_floor = n_near = n = n_far = 0
         for d in grid.reshape(-1, 3)[::3]:
             w = Vector(axes @ d)
             hit = scene.ray_cast(dg, cpos, w.normalized(), distance=30.0)
@@ -494,10 +603,24 @@ def main():
             ob = hit[4].original if hit[4] is not None else None
             if ob is not None and ob.pass_index in (L.IDX_FLOOR, L.IDX_RUG, L.IDX_FLAT) and hit[1].z - floor_z < L.RUG_TOP:
                 n_floor += 1
+                n_far += cross and (hit[1].to_2d() - c) @ nn > 0.05   # floor beyond the doorway's centre line
             if (hit[1] - cpos).length * (Vector(axes[:, 2]) @ w.normalized()) < 0.8:
                 n_near += 1
         if n_floor < 0.12 * n or n_near > 0.6 * n:
             continue
+        if cross and n_far < 0.03 * n:   # the next room's floor hardly visible (door leaf, furniture, angle)
+            continue
+        gain = 0.0
+        if cross and far_light is not None and rng.random() < args.far_bright:   # the far room brighter
+            gain = rng.uniform(2.5, 5.0)
+            for o, e in lamps.get(far, []):
+                o.data.energy = e * gain
+            # plus a ceiling area light 1 m into the far room (rooms lit only through windows / skylights have
+            # no lamp to scale): (gain - 1) x the room's lamp power, at least 20 W
+            q = c + nn * 1.0
+            up = scene.ray_cast(dg, Vector((q.x, q.y, floor_z + 0.5)), Vector((0, 0, 1)), distance=4.0)
+            far_light.location = (q.x, q.y, (up[1].z if up[0] else floor_z + 2.4) - 0.05)
+            far_light.data.energy = (gain - 1) * max(sum(e for _, e in lamps.get(far, [])), 20.0)
         cam.matrix_world = Matrix.Translation(cpos) @ Matrix(L.blender_rotation(axes).tolist()).to_4x4()
         name = f"r{args.room:05d}_{k}"
         exr = os.path.join(args.out, "rooms", name + ".exr")
@@ -510,10 +633,21 @@ def main():
         scene.render.image_settings.file_format = "PNG"
         scene.render.image_settings.color_depth = "8"
         bpy.data.images["Render Result"].save_render(filepath=png)   # with the scene's view transform
+        if gain:   # lights back as they were
+            for o, e in lamps.get(far, []):
+                o.data.energy = e
+            far_light.data.energy = 0.0
         pos, idx = read_exr(exr)
         rgb_r = read_png_bgr(png, wr, hr)
         pos = pos.reshape(hr, wr, 3)
         floor_r, depth_r = L.labels_from_passes(pos, idx.reshape(hr, wr), cpos, axes, floor_z)
+        lum_ratio = None
+        if cross:   # QA: mean brightness of the far floor / the near floor (> 0.1 m from the centre line)
+            acr = (pos[..., 0] - c.x) * nn.x + (pos[..., 1] - c.y) * nn.y
+            lum = rgb_r.mean(axis=2)
+            fm, nm = floor_r & (acr > 0.1), floor_r & (acr < -0.1)
+            if fm.sum() > 100 and nm.sum() > 100:
+                lum_ratio = round(float(lum[fm].mean() / max(lum[nm].mean(), 1.0)), 3)
         under_r = L.under_mask(pos, floor_r, um) if um is not None else None
         os.remove(exr)
         os.remove(png)
@@ -542,9 +676,13 @@ def main():
         extra = dict(floor_material=floor_final, floor_infinigen=fkind, wall_paint=paint and paint[0],
                      cables=n_cables, thresholds=n_thr,
                      aim=mode, under_frac=round(ufrac, 4), render_s=round(time.time() - t1, 1))
+        if cross:   # near / far floor families, far-room lamp gain (0: off), measured far / near floor brightness
+            extra.update(near_floor=final_of[near], far_floor=final_of[far], far_gain=round(gain, 2),
+                         far_near_lum=lum_ratio)
         lines.append(L.stats_line(name, args.room, args.room_type, args.seed, (x, y, yaw, h, pitch, roll), frac,
                                   extra))
-        print(f"  {name}: floor {frac:.2f}, aim {mode}, {time.time() - t1:.1f} s", flush=True)
+        print(f"  {name}: floor {frac:.2f}, aim {mode}, {time.time() - t1:.1f} s"
+              f"{f', far gain {gain:.1f}, far/near floor brightness {lum_ratio}' if cross else ''}", flush=True)
         k += 1
     for path in tmp_tex:
         os.remove(path)
